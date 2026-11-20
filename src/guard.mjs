@@ -1,13 +1,16 @@
 // Gives every step inside the code the same checks a normal tool call gets:
 //  1. guard modules (in-process, fast): export default (step) => reason | { deny } | { note } | null
-//  2. Claude Code's PreToolUse / PostToolUse command hooks from the settings files, run with the documented JSON input
+//  2. Claude Code's deny and ask permission rules from the settings files (rules.mjs)
+//  3. Claude Code's PreToolUse / PostToolUse command hooks from the settings files, run with the documented JSON input
 //     and read with the documented exit codes and fields (https://code.claude.com/docs/en/hooks)
+// 2 and 3 are on when lever runs under Claude Code (config hooks: 'auto') or when hooks is 'on'.
 // A step is named after the Claude Code tool it stands for: Bash, Read, Write, Edit, Glob, Grep, mcp__server__tool.
 import { spawn } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { createRules } from './rules.mjs'
 
 export function settingsFiles(projectDir) {
   const userDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')
@@ -43,16 +46,26 @@ export function matcherMatches(matcher, toolName) {
   }
 }
 
-export function loadHooks(projectDir) {
-  const hooks = { PreToolUse: [], PostToolUse: [] }
-  let disabled = false
-  for (const file of settingsFiles(projectDir)) {
-    let settings
+/** The settings files that exist, each with the folder its "/path" rules start from. */
+export function readSettings(projectDir) {
+  const userDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')
+  const out = []
+  for (const [index, file] of settingsFiles(projectDir).entries()) {
+    let data
     try {
-      settings = JSON.parse(readFileSync(file, 'utf8'))
+      data = JSON.parse(readFileSync(file, 'utf8'))
     } catch {
       continue
     }
+    out.push({ file, data, root: index === 0 ? userDir : projectDir, cwd: projectDir })
+  }
+  return out
+}
+
+export function loadHooks(projectDir, sources = readSettings(projectDir)) {
+  const hooks = { PreToolUse: [], PostToolUse: [] }
+  let disabled = false
+  for (const { file, data: settings } of sources) {
     if (settings?.disableAllHooks === true) disabled = true
     for (const event of Object.keys(hooks)) {
       for (const group of settings?.hooks?.[event] ?? []) {
@@ -158,10 +171,11 @@ export function createGuard({ projectDir, hooks = 'off', guards = [], sessionId 
   let checkedAt = 0
   let toolUseCount = 0
 
-  const hookSet = () => {
-    if (hooks !== 'on') return { PreToolUse: [], PostToolUse: [] }
+  const empty = { hooks: { PreToolUse: [], PostToolUse: [] }, rules: createRules([]) }
+  const current = () => {
+    if (hooks !== 'on') return empty
     const now = Date.now()
-    if (cached && now - checkedAt < 2000) return cached.hooks
+    if (cached && now - checkedAt < 2000) return cached
     checkedAt = now
     const stamp = settingsFiles(projectDir)
       .map(file => {
@@ -172,8 +186,11 @@ export function createGuard({ projectDir, hooks = 'off', guards = [], sessionId 
         }
       })
       .join(',')
-    if (!cached || cached.stamp !== stamp) cached = { stamp, hooks: loadHooks(projectDir) }
-    return cached.hooks
+    if (!cached || cached.stamp !== stamp) {
+      const sources = readSettings(projectDir)
+      cached = { stamp, hooks: loadHooks(projectDir, sources), rules: createRules(sources) }
+    }
+    return cached
   }
 
   /** Before a step: { deny } refuses it; `notes` go to the model; `input` replaces the step's input when a hook says so. */
@@ -192,7 +209,10 @@ export function createGuard({ projectDir, hooks = 'off', guards = [], sessionId 
       if (verdict.deny) return { deny: String(verdict.deny), notes }
       if (verdict.note) notes.push(String(verdict.note))
     }
-    const matching = hookSet().PreToolUse.filter(hook => matcherMatches(hook.matcher, tool))
+    const settings = current()
+    const refusal = settings.rules.check(tool, input)
+    if (refusal) return { deny: refusal.deny, notes }
+    const matching = settings.hooks.PreToolUse.filter(hook => matcherMatches(hook.matcher, tool))
     if (matching.length === 0) return { notes, input }
     const payload = {
       session_id: sessionId,
@@ -214,7 +234,7 @@ export function createGuard({ projectDir, hooks = 'off', guards = [], sessionId 
 
   /** After a step that ran: notes from PostToolUse hooks. */
   async function after(tool, input, response) {
-    const matching = hookSet().PostToolUse.filter(hook => matcherMatches(hook.matcher, tool))
+    const matching = current().hooks.PostToolUse.filter(hook => matcherMatches(hook.matcher, tool))
     if (matching.length === 0) return []
     const payload = {
       session_id: sessionId,
@@ -229,5 +249,8 @@ export function createGuard({ projectDir, hooks = 'off', guards = [], sessionId 
     return results.flatMap(readPostHook)
   }
 
-  return { before, after, describe: () => ({ hooks, guards, settings: settingsFiles(projectDir) }) }
+  /** True when a permission rule keeps this file from being read, so listings and search results leave it out. */
+  const hidden = file => current().rules.hidden(file)
+
+  return { before, after, hidden, describe: () => ({ hooks, guards, settings: settingsFiles(projectDir), rules: current().rules.size }) }
 }

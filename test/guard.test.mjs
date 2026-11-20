@@ -3,6 +3,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+
+// Keep the real user settings (and their rules and hooks) out of these tests.
+process.env.CLAUDE_CONFIG_DIR = (await import('node:fs')).mkdtempSync((await import('node:path')).join((await import('node:os')).tmpdir(), 'lever-home-'))
 import { createGuard, matcherMatches, readPreHook } from '../src/guard.mjs'
 
 test('matchers follow the hooks reference', () => {

@@ -2,11 +2,13 @@
 // Claude Code's local and user settings, and the project's .mcp.json (only the servers Claude Code approved there).
 // Each server starts on first use and stays up for the session.
 import { spawn } from 'node:child_process'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { VERSION } from '../config.mjs'
+import { privateDir } from '../format.mjs'
 import { killTree, StepRefused } from './shell.mjs'
 
 const CLIENT = { name: 'lever', version: VERSION }
@@ -44,8 +46,8 @@ function claudeFiles(projectDir) {
   const state = process.env.CLAUDE_CONFIG_DIR ? path.join(process.env.CLAUDE_CONFIG_DIR, '.claude.json') : path.join(os.homedir(), '.claude.json')
   return {
     state,
-    // settings that a cloned repository cannot write for itself
-    trusted: [path.join(home, 'settings.json'), path.join(projectDir, '.claude', 'settings.local.json')],
+    user: path.join(home, 'settings.json'),
+    local: path.join(projectDir, '.claude', 'settings.local.json'),
     all: [path.join(home, 'settings.json'), path.join(projectDir, '.claude', 'settings.json'), path.join(projectDir, '.claude', 'settings.local.json')],
   }
 }
@@ -67,7 +69,9 @@ export function serverList(config) {
   add(config.mcpServers, 'lever config')
   if (config.mcpImport?.includes('claude')) add(projectState.mcpServers, 'Claude Code (local)', name => (disabled.has(name) ? 'disabled for this project in Claude Code' : null))
   if (config.mcpImport?.includes('project')) {
-    const trusted = files.trusted.map(readJson).filter(Boolean)
+    // A cloned repository can ship its own .claude/settings.local.json, so that file counts only in a folder the user
+    // already trusted in Claude Code.
+    const trusted = [files.user, ...(projectState.hasTrustDialogAccepted === true ? [files.local] : [])].map(readJson).filter(Boolean)
     const rejected = new Set([...files.all.map(readJson).filter(Boolean), projectState].flatMap(s => s.disabledMcpjsonServers ?? []))
     const approved = name =>
       [...trusted, projectState].some(s => s.enableAllProjectMcpServers === true || (s.enabledMcpjsonServers ?? []).includes(name))
@@ -293,10 +297,9 @@ export function createMcp(env, config) {
   }
 
   const saveMedia = (item, label) => {
-    const dir = path.join(env.spillDir ?? os.tmpdir(), 'mcp')
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
-    const file = path.join(dir, `${label}-${Date.now()}.${EXT[item.mimeType] ?? 'bin'}`)
-    writeFileSync(file, Buffer.from(item.data, 'base64'), { mode: 0o600 })
+    const dir = privateDir(env.spillDir ?? path.join(os.tmpdir(), 'lever'))
+    const file = path.join(dir, `${label}-${randomBytes(4).toString('hex')}.${EXT[item.mimeType] ?? 'bin'}`)
+    writeFileSync(file, Buffer.from(item.data, 'base64'), { mode: 0o600, flag: 'wx' })
     return file
   }
 

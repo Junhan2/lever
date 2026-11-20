@@ -100,7 +100,6 @@ export function createFiles(env) {
   async function edit(input, first, second, third) {
     const run = env.run()
     const file = absolute(input)
-    const original = await fs.readFile(file, 'utf8')
     let options = {}
     let pairs = null
     let transform = null
@@ -117,9 +116,14 @@ export function createFiles(env) {
       new_string: String(newText ?? ''),
       replace_all: Boolean(options.all),
     }))
-    const hookInput =
-      edits.length === 1 ? { file_path: file, ...edits[0] } : { file_path: file, edits: transform ? [] : edits }
-    await check(run, edits.length === 1 ? 'Edit' : 'MultiEdit', hookInput, shown(file))
+    let tool = edits.length === 1 ? 'Edit' : 'MultiEdit'
+    let hookInput = edits.length === 1 ? { file_path: file, ...edits[0] } : { file_path: file, edits }
+    // A function edit hands the whole file to the code, so it is checked as a read now and as a write of the new text
+    // before anything is written.
+    if (transform) await check(run, 'Read', { file_path: file }, shown(file))
+    else await check(run, tool, hookInput, shown(file))
+    const original = await fs.readFile(file, 'utf8')
+    run.bytesIn += Buffer.byteLength(original)
 
     let text = original
     let replaced = 0
@@ -128,6 +132,9 @@ export function createFiles(env) {
     if (transform) {
       text = await transform(original)
       if (typeof text !== 'string') throw new EditError(`edit(${shown(file)}, fn): the function must return the new text`)
+      tool = 'Write'
+      hookInput = { file_path: file, content: text }
+      if (text !== original) await check(run, 'Write', hookInput, shown(file))
     } else {
       for (const { old_string: oldText, new_string: newText } of edits) {
         if (oldText === '') throw new EditError(`edit(${shown(file)}): the text to replace is empty`)
@@ -153,13 +160,15 @@ export function createFiles(env) {
     await remember(run, file)
     await fs.writeFile(file, text)
     run.step({ kind: 'edit', label: shown(file), ok: true, changed: true, detail: replaced ? `${replaced}×` : 'rewritten' })
-    run.note(await env.guard.after(edits.length === 1 ? 'Edit' : 'MultiEdit', hookInput, { filePath: file, success: true }))
+    run.note(await env.guard.after(tool, hookInput, { filePath: file, success: true }))
     return { path: shown(file), replaced, added, removed, changed: true }
   }
 
   async function exists(input) {
+    const file = absolute(input)
+    await check(env.run(), 'Read', { file_path: file }, shown(file))
     try {
-      await fs.access(absolute(input))
+      await fs.access(file)
       return true
     } catch {
       return false
@@ -172,7 +181,10 @@ export function createFiles(env) {
     await check(run, 'Glob', { pattern: '*', path: dir }, shown(dir))
     const entries = await fs.readdir(dir, { withFileTypes: true })
     run.step({ kind: 'ls', label: shown(dir), ok: true })
-    return entries.map(entry => (entry.isDirectory() ? `${entry.name}/` : entry.name)).sort()
+    return entries
+      .filter(entry => !env.guard.hidden?.(path.join(dir, entry.name)))
+      .map(entry => (entry.isDirectory() ? `${entry.name}/` : entry.name))
+      .sort()
   }
 
   /** Puts back the files the most recent changing run (or run `id`) touched. A file changed again since is skipped

@@ -4,9 +4,9 @@ import { spawn } from 'node:child_process'
 import { existsSync, promises as fs, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { escapeRegExp, GLOB_CHARS, globRoot, globToRegExp } from '../glob.mjs'
 import { StepRefused } from './shell.mjs'
 
-const GLOB_CHARS = /[*?[{]/
 const LINE_MAX = 300
 const SKIP_DIRS = new Set(['.git', 'node_modules'])
 
@@ -25,58 +25,6 @@ export function findRipgrep() {
     }
   }
   return null
-}
-
-const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-
-/** A glob as a RegExp over a whole path: `*` and `?` stay inside one folder, `**` crosses folders, `{a,b}` and
- * `[abc]` work. `*.ts` matches only at the top; use `**\/*.ts` for every folder. */
-export function globToRegExp(pattern, { ignoreCase = false } = {}) {
-  let source = ''
-  let groups = 0
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i]
-    if (c === '*') {
-      if (pattern[i + 1] === '*') {
-        const wholeSegment = (i === 0 || pattern[i - 1] === '/') && (pattern[i + 2] === '/' || pattern[i + 2] === undefined)
-        if (wholeSegment && pattern[i + 2] === '/') {
-          source += '(?:.*/)?'
-          i += 2
-        } else {
-          source += wholeSegment ? '.*' : '[^/]*'
-          i += 1
-        }
-      } else source += '[^/]*'
-    } else if (c === '?') source += '[^/]'
-    else if (c === '[' && pattern.indexOf(']', i + 2) !== -1) {
-      const end = pattern.indexOf(']', i + 2)
-      const body = pattern.slice(i + 1, end).replace(/\\/g, '\\\\')
-      source += `[${body[0] === '!' ? `^${body.slice(1)}` : body}]`
-      i = end
-    } else if (c === '{') {
-      source += '(?:'
-      groups++
-    } else if (c === '}' && groups > 0) {
-      source += ')'
-      groups--
-    } else if (c === ',' && groups > 0) source += '|'
-    else if (c === '\\' && i + 1 < pattern.length) source += escapeRegExp(pattern[++i])
-    else source += escapeRegExp(c)
-  }
-  if (groups > 0) throw new TypeError(`Unclosed { in glob ${pattern}`)
-  return new RegExp(`^${source}$`, ignoreCase ? 'i' : '')
-}
-
-/** The folder a glob can start listing from: the leading segments without glob characters. */
-export function globRoot(pattern) {
-  const parts = pattern.split('/')
-  const fixed = []
-  for (const part of parts.slice(0, -1)) {
-    if (GLOB_CHARS.test(part)) break
-    fixed.push(part)
-  }
-  const root = fixed.join('/')
-  return root === '' && pattern.startsWith('/') ? '/' : root
 }
 
 const toSlash = text => (process.platform === 'win32' ? text.replace(/\\/g, '/') : text)
@@ -146,6 +94,15 @@ export function createSearch(env) {
     return args
   }
 
+  /** Leaves out what a permission rule keeps from being read, and says how many. */
+  const visible = (items, fileOf, run) => {
+    if (!env.guard.hidden) return items
+    const kept = items.filter(item => !env.guard.hidden(absolute(fileOf(item))))
+    const dropped = new Set(items.filter(item => !kept.includes(item)).map(fileOf)).size
+    if (dropped) run.note([`left out ${dropped} file${dropped === 1 ? '' : 's'} that permission rules keep from being read`])
+    return kept
+  }
+
   const check = async (run, tool, input, label) => {
     const verdict = await env.guard.before(tool, input)
     run.note(verdict.notes)
@@ -185,6 +142,7 @@ export function createSearch(env) {
         }
       }
     }
+    files = visible(files, file => file, run)
     files.sort()
     run.bytesIn += files.reduce((sum, file) => sum + file.length + 1, 0)
     run.step({ kind: 'glob', label: full, ok: true, detail: `${files.length} files`, ms: Date.now() - started })
@@ -256,6 +214,8 @@ export function createSearch(env) {
       result = await nodeGrep(pattern, targets, { ...options, ignoreCase, before, after, max, mode, globs, run })
     }
 
+    if (Array.isArray(result)) result = visible(result, item => (typeof item === 'string' ? item : item.file), run)
+    else result = Object.fromEntries(visible(Object.entries(result), ([file]) => file, run))
     const size = Array.isArray(result) ? result.length : Object.keys(result).length
     run.step({ kind: 'grep', label, ok: true, detail: `${size} ${mode === 'content' ? 'matches' : 'files'}`, ms: Date.now() - started })
     const response =
@@ -396,3 +356,5 @@ export function createSearch(env) {
 
   return { glob, grep, ripgrep: rg }
 }
+
+export { globRoot, globToRegExp }

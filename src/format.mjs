@@ -1,6 +1,8 @@
 // Turns what a run produced into the short text the model reads. Values made inside the code come from another
 // realm (the REPL context), so type checks use tags and duck typing, never instanceof.
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { lstatSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 
 const tagOf = value => Object.prototype.toString.call(value).slice(8, -1)
@@ -163,12 +165,29 @@ export function render(value, limits = {}) {
   return lines.join('\n')
 }
 
-/** Saves `text` under `dir` and returns the file path, or null when the folder cannot be written. */
-export function spill(text, dir, label) {
+let fallbackDir = null
+
+/** `dir` when it is a real folder owned by this user and closed to others (it is created that way when missing);
+ * otherwise a fresh private folder. Another user on a shared /tmp cannot plant the folder or a link in its place. */
+export function privateDir(dir) {
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
-    const file = path.join(dir, `${label}.txt`)
-    writeFileSync(file, text, { mode: 0o600 })
+    const info = lstatSync(dir)
+    const mine = typeof process.getuid !== 'function' || info.uid === process.getuid()
+    const closed = process.platform === 'win32' || (info.mode & 0o077) === 0
+    if (info.isDirectory() && mine && closed) return dir
+  } catch {
+    // use the fallback
+  }
+  fallbackDir ??= mkdtempSync(path.join(os.tmpdir(), 'lever-'))
+  return fallbackDir
+}
+
+/** Saves `text` under `dir` with an unguessable name and returns the path, or null when it cannot be written. */
+export function spill(text, dir, label) {
+  try {
+    const file = path.join(privateDir(dir), `${label}-${randomBytes(4).toString('hex')}.txt`)
+    writeFileSync(file, text, { mode: 0o600, flag: 'wx' })
     return file
   } catch {
     return null
