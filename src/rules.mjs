@@ -5,7 +5,7 @@
 //   Read(path)        gitignore-style paths for read, glob, grep and ls; as a deny rule it also covers writes
 //   Edit(path)        paths for write, edit and undo
 //   mcp__server[__tool], tool-name globs such as mcp__* or *
-import { lstatSync, readlinkSync, realpathSync } from 'node:fs'
+import { lstatSync, readlinkSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { globToRegExp } from './glob.mjs'
@@ -187,32 +187,42 @@ function pathMatches(compiled, file) {
   return false
 }
 
-/** The path as given and as it really is on disk: links resolved, and for a file that does not exist yet, its nearest
- * existing folder resolved with the rest of the path added back. */
-const variants = (file, depth = 0) => {
-  const out = [file]
-  let base = file
-  let rest = ''
-  for (;;) {
-    try {
-      const real = path.join(realpathSync.native(base), rest)
-      if (real !== file) out.push(real)
-      return out
-    } catch {
-      // a link whose target does not exist yet: writing through it creates the target, so check the target too
-      try {
-        if (depth < 8 && lstatSync(base).isSymbolicLink()) {
-          out.push(...variants(path.join(path.resolve(path.dirname(base), readlinkSync(base)), rest), depth + 1))
-        }
-      } catch {
-        // not there at all
-      }
-      const parent = path.dirname(base)
-      if (parent === base) return out
-      rest = path.join(path.basename(base), rest)
-      base = parent
+/** Where `file` really is: each folder and link followed in order from the root, as the system does, with a missing
+ * end left as written (a write creates it). null when the links go round or run too deep, which counts as refused. */
+export function resolvePath(file) {
+  const absolute = path.resolve(file)
+  let queue = absolute.split(path.sep).filter(Boolean)
+  let current = path.parse(absolute).root
+  let links = 0
+  while (queue.length) {
+    const part = queue.shift()
+    if (part === '.') continue
+    if (part === '..') {
+      current = path.dirname(current)
+      continue
     }
+    const next = path.join(current, part)
+    let info
+    try {
+      info = lstatSync(next)
+    } catch {
+      return path.join(next, ...queue)
+    }
+    if (info.isSymbolicLink()) {
+      if (++links > 40) return null
+      let target
+      try {
+        target = readlinkSync(next)
+      } catch {
+        return null
+      }
+      if (path.isAbsolute(target)) current = path.parse(target).root
+      queue = [...target.split(path.sep).filter(Boolean), ...queue]
+      continue
+    }
+    current = next
   }
+  return current
 }
 
 /** sources: [{ file, root, cwd, data }] from the settings files. */
@@ -233,7 +243,11 @@ export function createRules(sources) {
   const hasReadPaths = lists.some(list => list.rules.some(rule => rule.path && rule.tool === 'Read'))
 
   /** The first rule that stops `file` for the given use ('read' or 'edit'), honouring ! carve-outs within one list. */
-  function pathRule(kind, use, file) {
+  function pathRule(kind, use, file, resolve = true) {
+    // A step is checked against the path as written and where it really leads; a path that cannot be resolved is
+    // refused by any rule that could apply. Search results are only compared as written (resolve false), for speed.
+    const real = resolve ? resolvePath(file) : file
+    const candidates = real === null ? [] : real === file ? [file] : [file, real]
     for (const list of lists) {
       if (list.kind !== kind) continue
       let hit = null
@@ -242,7 +256,7 @@ export function createRules(sources) {
         // Read rules cover edits too: an edit's errors tell what the file holds
         const applies = rule.tool === 'Edit' ? use === 'edit' : use === 'read' || use === 'edit'
         if (!applies) continue
-        const matched = variants(file).some(candidate => pathMatches(rule.path, candidate))
+        const matched = real === null ? !rule.path.negate : candidates.some(candidate => pathMatches(rule.path, candidate))
         if (rule.path.negate) {
           if (hit && matched) hit = null
         } else if (matched && !hit) hit = rule
@@ -287,7 +301,7 @@ export function createRules(sources) {
     /** True when reading this file is refused, so search results and listings can leave it out. */
     hidden(file) {
       if (!hasReadPaths) return false
-      return Boolean(pathRule('deny', 'read', file) ?? pathRule('ask', 'read', file))
+      return Boolean(pathRule('deny', 'read', file, false) ?? pathRule('ask', 'read', file, false))
     },
   }
 }

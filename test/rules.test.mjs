@@ -115,3 +115,21 @@ test('escaped parentheses and dangling links do not slip past', async () => {
   assert.ok(rules.check('Bash', { command: 'echo $(echo \\) && rm -rf x)' }))
   assert.ok(rules.check('Write', { file_path: path.join(base, 'dangling') }))
 })
+
+test('paths resolve link by link from the real folder, and endless links are refused', async () => {
+  const { mkdtempSync, symlinkSync, realpathSync } = await import('node:fs')
+  const { resolvePath } = await import('../src/rules.mjs')
+  const base = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'lever-rules-')))
+  mkdirSync(path.join(base, 'secrets'))
+  mkdirSync(path.join(base, 'a', 'b'), { recursive: true })
+  symlinkSync(path.join(base, 'a', 'b'), path.join(base, 'hop'))
+  symlinkSync('../../secrets/new.txt', path.join(base, 'a', 'b', 'rel')) // relative to the real folder a/b
+  symlinkSync(path.join(base, 'loop2'), path.join(base, 'loop1'))
+  symlinkSync(path.join(base, 'loop1'), path.join(base, 'loop2'))
+  assert.equal(resolvePath(path.join(base, 'hop', 'rel')), path.join(base, 'secrets', 'new.txt'))
+  assert.equal(resolvePath(path.join(base, 'loop1', 'x')), null)
+  const rules = rulesFor({ deny: ['Edit(secrets/**)'] }, { root: base, cwd: base })
+  assert.ok(rules.check('Write', { file_path: path.join(base, 'hop', 'rel') }))
+  assert.ok(rules.check('Write', { file_path: path.join(base, 'loop1', 'x') }))
+  assert.equal(rules.check('Write', { file_path: path.join(base, 'a', 'ok.txt') }), null)
+})
