@@ -15,6 +15,8 @@ const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', 
 const ENDINGS = new Set(['fi', 'done', 'esac', '}', ')'])
 const READ_TOOLS = new Set(['Read', 'Glob', 'Grep'])
 const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
+// macOS and Windows file systems ignore case by default, so .ENV opens .env there
+const IGNORE_CASE = process.platform === 'darwin' || process.platform === 'win32'
 
 /** "Tool" or "Tool(specifier)". */
 export function parseRule(text) {
@@ -67,12 +69,18 @@ export function bashPieces(command) {
           continue
         }
       }
-      if (c === '$' && text[i + 1] === '(') {
+      if ((c === '$' || ((c === '<' || c === '>') && !quote)) && text[i + 1] === '(') {
         let depth = 0
+        let inner = null
         let j = i + 1
         for (; j < text.length; j++) {
-          if (text[j] === '(') depth++
-          else if (text[j] === ')' && --depth === 0) break
+          const d = text[j]
+          if (inner) {
+            if (d === '\\' && inner === '"') j++
+            else if (d === inner) inner = null
+          } else if (d === "'" || d === '"') inner = d
+          else if (d === '(') depth++
+          else if (d === ')' && --depth === 0) break
         }
         visit(text.slice(i + 2, j))
         current += text.slice(i, j + 1)
@@ -160,12 +168,14 @@ function compilePath(spec, source) {
   const anyDepth = !trimmed.includes('/') || (relative && /^[^/*]+\/\*\*$/.test(trimmed))
   const pattern = anyDepth && !trimmed.startsWith('**/') ? `**/${trimmed}` : trimmed
   // folder/** also covers the folder itself, so a search that starts there is stopped too
-  const folder = pattern.endsWith('/**') && pattern.length > 3 ? globToRegExp(pattern.slice(0, -3)) : null
-  return { negate, anchor, regex: globToRegExp(pattern), folder }
+  const options = { ignoreCase: IGNORE_CASE }
+  const folder = pattern.endsWith('/**') && pattern.length > 3 ? globToRegExp(pattern.slice(0, -3), options) : null
+  return { negate, anchor, regex: globToRegExp(pattern, options), folder }
 }
 
 function pathMatches(compiled, file) {
-  const relative = path.relative(compiled.anchor, file).split(path.sep).join('/')
+  const fold = text => (IGNORE_CASE ? text.toLowerCase() : text)
+  const relative = path.relative(fold(compiled.anchor), fold(file)).split(path.sep).join('/')
   if (relative.startsWith('..') || path.isAbsolute(relative)) return false
   const parts = relative.split('/')
   // the path itself, or a folder above it (a matched folder covers what is inside)
@@ -176,15 +186,24 @@ function pathMatches(compiled, file) {
   return false
 }
 
+/** The path as given and as it really is on disk: links resolved, and for a file that does not exist yet, its nearest
+ * existing folder resolved with the rest of the path added back. */
 const variants = file => {
   const out = [file]
-  try {
-    const real = realpathSync(file)
-    if (real !== file) out.push(real)
-  } catch {
-    // a file that does not exist yet
+  let base = file
+  let rest = ''
+  for (;;) {
+    try {
+      const real = path.join(realpathSync.native(base), rest)
+      if (real !== file) out.push(real)
+      return out
+    } catch {
+      const parent = path.dirname(base)
+      if (parent === base) return out
+      rest = path.join(path.basename(base), rest)
+      base = parent
+    }
   }
-  return out
 }
 
 /** sources: [{ file, root, cwd, data }] from the settings files. */
@@ -211,7 +230,8 @@ export function createRules(sources) {
       let hit = null
       for (const rule of list.rules) {
         if (!rule.path) continue
-        const applies = rule.tool === 'Edit' ? use === 'edit' : use === 'read' || (use === 'edit' && kind === 'deny')
+        // Read rules cover edits too: an edit's errors tell what the file holds
+        const applies = rule.tool === 'Edit' ? use === 'edit' : use === 'read' || use === 'edit'
         if (!applies) continue
         const matched = variants(file).some(candidate => pathMatches(rule.path, candidate))
         if (rule.path.negate) {

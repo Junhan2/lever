@@ -92,3 +92,16 @@ test('helpers follow the project settings: refused reads, hidden search results,
   assert.deepEqual(await search.glob('*', { hidden: true }), ['app.ts', 'locked.txt'])
   assert.ok(!(await files.ls('.')).includes('.env'))
 })
+
+test('rules see through letter case, links to folders, process substitution; ask Read rules cover edits', async () => {
+  const { mkdtempSync, symlinkSync, realpathSync } = await import('node:fs')
+  const base = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'lever-rules-')))
+  mkdirSync(path.join(base, 'secrets'))
+  symlinkSync(path.join(base, 'secrets'), path.join(base, 'link'))
+  const rules = rulesFor({ deny: ['Read(secrets/**)', 'Bash(rm *)'], ask: ['Read(notes.md)'] }, { root: base, cwd: base })
+  assert.ok(rules.check('Write', { file_path: path.join(base, 'link', 'new.txt') }), 'a new file under a link into secrets')
+  if (process.platform === 'darwin') assert.ok(rules.check('Read', { file_path: path.join(base, 'SECRETS', 'a.txt') }), 'letter case')
+  assert.ok(rules.check('Bash', { command: 'diff <(rm -rf x) y' }))
+  assert.ok(rules.check('Bash', { command: 'echo "$(echo ")" && rm -rf x)"' }))
+  assert.match(rules.check('Edit', { file_path: path.join(base, 'notes.md') })?.deny ?? '', /wants a person/)
+})
