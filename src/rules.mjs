@@ -5,7 +5,7 @@
 //   Read(path)        gitignore-style paths for read, glob, grep and ls; as a deny rule it also covers writes
 //   Edit(path)        paths for write, edit and undo
 //   mcp__server[__tool], tool-name globs such as mcp__* or *
-import { realpathSync } from 'node:fs'
+import { lstatSync, readlinkSync, realpathSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { globToRegExp } from './glob.mjs'
@@ -78,7 +78,8 @@ export function bashPieces(command) {
           if (inner) {
             if (d === '\\' && inner === '"') j++
             else if (d === inner) inner = null
-          } else if (d === "'" || d === '"') inner = d
+          } else if (d === '\\') j++
+          else if (d === "'" || d === '"') inner = d
           else if (d === '(') depth++
           else if (d === ')' && --depth === 0) break
         }
@@ -188,7 +189,7 @@ function pathMatches(compiled, file) {
 
 /** The path as given and as it really is on disk: links resolved, and for a file that does not exist yet, its nearest
  * existing folder resolved with the rest of the path added back. */
-const variants = file => {
+const variants = (file, depth = 0) => {
   const out = [file]
   let base = file
   let rest = ''
@@ -198,6 +199,14 @@ const variants = file => {
       if (real !== file) out.push(real)
       return out
     } catch {
+      // a link whose target does not exist yet: writing through it creates the target, so check the target too
+      try {
+        if (depth < 8 && lstatSync(base).isSymbolicLink()) {
+          out.push(...variants(path.join(path.resolve(path.dirname(base), readlinkSync(base)), rest), depth + 1))
+        }
+      } catch {
+        // not there at all
+      }
       const parent = path.dirname(base)
       if (parent === base) return out
       rest = path.join(path.basename(base), rest)

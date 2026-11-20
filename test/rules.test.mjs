@@ -105,3 +105,13 @@ test('rules see through letter case, links to folders, process substitution; ask
   assert.ok(rules.check('Bash', { command: 'echo "$(echo ")" && rm -rf x)"' }))
   assert.match(rules.check('Edit', { file_path: path.join(base, 'notes.md') })?.deny ?? '', /wants a person/)
 })
+
+test('escaped parentheses and dangling links do not slip past', async () => {
+  const { mkdtempSync, symlinkSync, realpathSync } = await import('node:fs')
+  const base = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'lever-rules-')))
+  mkdirSync(path.join(base, 'secrets'))
+  symlinkSync(path.join(base, 'secrets', 'planted.txt'), path.join(base, 'dangling'))
+  const rules = rulesFor({ deny: ['Read(secrets/**)', 'Bash(rm *)'] }, { root: base, cwd: base })
+  assert.ok(rules.check('Bash', { command: 'echo $(echo \\) && rm -rf x)' }))
+  assert.ok(rules.check('Write', { file_path: path.join(base, 'dangling') }))
+})
