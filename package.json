@@ -1,0 +1,32 @@
+{
+  "name": "lever-mcp",
+  "version": "0.1.0",
+  "description": "Code Mode for any MCP client: the model writes one piece of JavaScript that runs many shell, file, search and MCP steps, and only the result comes back.",
+  "type": "module",
+  "bin": {
+    "lever": "bin/lever.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "README.ko.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "bench": "node bench/run.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "code-mode",
+    "claude-code",
+    "codex",
+    "agents",
+    "tool-calling"
+  ],
+  "license": "MIT"
+}
