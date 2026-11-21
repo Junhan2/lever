@@ -82,3 +82,10 @@ test('undo across runs, long replies saved to a file, imports and promises in va
   assert.equal((await session.run('4', "import { basename } from 'node:path'\nbasename('/a/b.txt')")).text, 'b.txt')
   assert.equal((await session.run('5', '({ a: Promise.resolve(1), b: sleep(5).then(() => 2) })')).text, 'a: 1\nb: 2')
 })
+
+test('an error from two lines read as one expression says how to fix it', async () => {
+  const session = createSession(configFor(project()))
+  const reply = await session.run('1', "const items = [1, 2].map(n => n * 2)\n({ items })")
+  assert.equal(reply.isError, true)
+  assert.match(reply.text, /hint: line 2 starts with "\(" and the line before has no ";"/)
+})

@@ -205,8 +205,14 @@ export function createSession(config, events = {}) {
     const at = name ? new RegExp(`${name}:(\\d+)`).exec(String(error?.stack ?? '')) : null
     if (at) {
       const line = Number(at[1])
-      const source = code.split('\n')[line - 1]
+      const lines = code.split('\n')
+      const source = lines[line - 1]
       if (source !== undefined) text += `\n  at line ${line}: ${short(source, 160)}`
+      // A line that starts with ( [ or ` continues the line before it when that one has no semicolon.
+      const before = lines.slice(0, line - 1).reverse().find(l => l.trim() !== '')
+      if (source !== undefined && /^\s*[([`]/.test(source) && before !== undefined && !/[;{}]\s*$/.test(before.trim())) {
+        text += `\n  hint: line ${line} starts with "${source.trim()[0]}" and the line before has no ";", so JavaScript reads them as one expression. Add ";" or use return.`
+      }
     }
     return text
   }
