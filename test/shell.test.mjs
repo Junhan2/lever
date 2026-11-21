@@ -29,7 +29,8 @@ test('a failing command throws, unless nothrow', async () => {
   await assert.rejects($`echo out; echo bad >&2; exit 3`, error => {
     assert.equal(error.name, 'ShellError')
     assert.match(error.message, /exit 3/)
-    assert.match(error.message, /bad/)
+    // both streams had text, so both ends are in the message (npm test: npm's note on stderr, the report on stdout)
+    assert.match(error.message, /stderr \(end\):\nbad\nstdout \(end\):\nout$/)
     return true
   })
   const result = await $`exit 3`.nothrow()

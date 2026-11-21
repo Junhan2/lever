@@ -7,7 +7,7 @@ import path from 'node:path'
 import { formatWithOptions } from 'node:util'
 import { help } from './docs.mjs'
 import { createEvaluator } from './evaluate.mjs'
-import { bytes, capReply, errorText, isShellResult, render, seconds, settle, shellText } from './format.mjs'
+import { bytes, capReply, errorText, isShellResult, render, renderWithin, seconds, settle, shellText } from './format.mjs'
 import { createGuard } from './guard.mjs'
 import { createFiles } from './helpers/files.mjs'
 import { createSearch } from './helpers/search.mjs'
@@ -243,15 +243,11 @@ export function createSession(config, events = {}) {
   }
 
   function compose(run, code, filename, value, error) {
-    const parts = []
-    if (run.logs.length) parts.push(run.logs.join('\n') + (run.logsDropped ? `\n…[${run.logsDropped} more log lines dropped]` : ''))
-    if (error) parts.push(describeError(error, code, filename))
-    else {
-      const text = render(value)
-      if (text !== '') parts.push(text)
-    }
-    const body = parts.join('\n') || '(done, nothing returned)'
-    const capped = capReply(body, { maxOutput: config.maxOutput, spillDir: config.spillDir, label: `run-${process.pid}-${run.id}` })
+    const logs = run.logs.length ? run.logs.join('\n') + (run.logsDropped ? `\n…[${run.logsDropped} more log lines dropped]` : '') : ''
+    // The value gets the room the logs leave, and long strings inside it are cut only as much as that needs.
+    const result = error ? { text: describeError(error, code, filename) } : renderWithin(value, Math.max(1000, config.maxOutput - logs.length))
+    const body = text => [logs, text].filter(Boolean).join('\n') || '(done, nothing returned)'
+    const capped = capReply(body(result.text), { maxOutput: config.maxOutput, spillDir: config.spillDir, label: `run-${process.pid}-${run.id}`, whole: body(result.whole ?? result.text) })
     const footer = summary(run, Buffer.byteLength(capped.text))
     return { text: footer ? `${capped.text}\n---\n${footer}` : capped.text, isError: Boolean(error), file: capped.file }
   }

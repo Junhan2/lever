@@ -34,10 +34,12 @@ export async function settle(value, depth = 3) {
   return out
 }
 
+/** Keeps the start and the end: logs and test reports put their summary last. */
 export function cutMiddle(text, max, note = '') {
   if (text.length <= max) return text
-  const head = Math.floor(max * 0.7)
-  const tail = Math.max(0, max - head - 80)
+  const room = Math.max(0, max - 40 - note.length) // what the marker line leaves
+  const head = Math.ceil(room * 0.6)
+  const tail = room - head
   const cut = text.length - head - tail
   return `${text.slice(0, head)}\n…[${cut} chars cut${note}]…\n${tail ? text.slice(-tail) : ''}`
 }
@@ -66,7 +68,7 @@ export function toPlain(value, { maxString = 2000, maxItems = 200, maxDepth = 6 
     if (v === null || v === undefined) return v
     switch (typeof v) {
       case 'string':
-        return v.length > maxString ? `${v.slice(0, maxString)}…[+${v.length - maxString} chars]` : v
+        return cutMiddle(v, maxString)
       case 'number':
       case 'boolean':
         return v
@@ -165,6 +167,17 @@ export function render(value, limits = {}) {
   return lines.join('\n')
 }
 
+/** Renders a value in at most `max` characters when it can. Nothing is cut when the whole text fits; otherwise the long
+ * strings inside the value are cut in the middle, only as much as needed. `whole` is the uncut text. */
+export function renderWithin(value, max) {
+  const whole = render(value, { maxString: Infinity })
+  let text = whole
+  for (let maxString = max; text.length > max && maxString >= 200 && typeof value !== 'string'; maxString = Math.floor(maxString / 2)) {
+    text = render(value, { maxString })
+  }
+  return { text, whole }
+}
+
 let fallbackDir = null
 
 /** `dir` when it is a real folder owned by this user and closed to others (it is created that way when missing);
@@ -195,10 +208,12 @@ export function spill(text, dir, label) {
 }
 
 /** Caps the whole reply. When it is cut, the full text goes to a file and the reply says where. */
-export function capReply(text, { maxOutput, spillDir, label }) {
-  if (text.length <= maxOutput) return { text, file: null }
-  const file = spill(text, spillDir, label)
+/** Caps a reply at maxOutput characters. When anything was left out, `whole` (the uncut text) goes to a file. */
+export function capReply(text, { maxOutput, spillDir, label, whole = text }) {
+  if (text.length <= maxOutput && whole === text) return { text, file: null }
+  const file = spill(whole, spillDir, label)
   const note = file ? ` · full text: ${file}` : ''
+  if (text.length <= maxOutput) return { text: `${text}\n…[long values cut in the middle${note}]`, file }
   return { text: cutMiddle(text, maxOutput, note), file }
 }
 

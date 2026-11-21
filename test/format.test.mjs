@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { capReply, render, settle, shellText, toPlain } from '../src/format.mjs'
+import { capReply, render, renderWithin, settle, shellText, toPlain } from '../src/format.mjs'
 
 const shell = (over = {}) => ({ __lever: 'shell', command: 'npm test', exitCode: 0, signal: null, stdout: 'ok\n', stderr: '', ...over })
 
@@ -26,7 +26,8 @@ test('failed commands show status, stderr, then stdout', () => {
 
 test('long strings, long arrays and cycles are cut', () => {
   const big = toPlain({ s: 'x'.repeat(5000), a: Array.from({ length: 300 }, (_, i) => i) }, { maxString: 100, maxItems: 10 })
-  assert.match(big.s, /…\[\+4900 chars\]$/)
+  assert.ok(big.s.startsWith('xxx') && big.s.endsWith('xxx') && big.s.length <= 110)
+  assert.match(big.s, /…\[\d+ chars cut\]…/)
   assert.equal(big.a.length, 11)
   const loop = { name: 'a' }
   loop.self = loop
@@ -49,4 +50,15 @@ test('capReply cuts the middle and saves the full text', () => {
   assert.ok(existsSync(file))
   assert.equal(readFileSync(file, 'utf8'), text)
   assert.equal(capReply('short', { maxOutput: 1000, spillDir: dir, label: 'x' }).file, null)
+})
+
+test('renderWithin cuts nothing that fits, and keeps both ends of a long string that does not', () => {
+  const report = { exitCode: 1, stdout: `START${'.'.repeat(5000)}END` }
+  const roomy = renderWithin(report, 8000)
+  assert.equal(roomy.text, roomy.whole)
+  assert.match(roomy.text, /START\.{5000}END/)
+  const tight = renderWithin(report, 1000)
+  assert.ok(tight.text.length <= 1000)
+  assert.ok(tight.text.includes('START') && tight.text.includes('END'))
+  assert.ok(tight.whole.includes(`${'.'.repeat(5000)}END`))
 })

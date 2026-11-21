@@ -89,3 +89,15 @@ test('an error from two lines read as one expression says how to fix it', async 
   assert.equal(reply.isError, true)
   assert.match(reply.text, /hint: line 2 starts with "\(" and the line before has no ";"/)
 })
+
+test('a long string inside a returned object is cut only when the reply would be too long; the file keeps all of it', async () => {
+  const session = createSession(configFor(project(), { maxOutput: 1000 }))
+  const fits = await session.run('1', "({ log: 'a'.repeat(700) + 'END' })")
+  assert.match(fits.text, /a{700}END/)
+  assert.equal(fits.file, null)
+  const long = await session.run('2', "({ log: 'b'.repeat(5000) + 'END' })")
+  assert.ok(long.text.length < 1200)
+  assert.ok(long.text.includes('END'))
+  assert.match(long.text, /full text: /)
+  assert.ok(readFileSync(long.file, 'utf8').includes(`${'b'.repeat(5000)}END`))
+})

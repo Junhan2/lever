@@ -18,8 +18,13 @@ export function quote(value) {
 export class ShellError extends Error {
   constructor(result) {
     const status = result.signal ? `killed by ${result.signal}` : `exit ${result.exitCode}`
-    const tail = (result.stderr || result.stdout || '').trim().slice(-1500)
-    super(`Command failed (${status}): ${result.command}${tail ? `\n${tail}` : ''}`)
+    // Both ends can matter: npm writes its own note to stderr while the test report is on stdout.
+    const err = (result.stderr ?? '').trim()
+    const out = (result.stdout ?? '').trim()
+    const parts = [`Command failed (${status}): ${result.command}`]
+    if (err && out) parts.push(`stderr (end):\n${err.slice(-1500)}`, `stdout (end):\n${out.slice(-2500)}`)
+    else if (err || out) parts.push((err || out).slice(-2500))
+    super(parts.join('\n'))
     this.name = 'ShellError'
     this.result = result
   }
