@@ -6,11 +6,18 @@ import os from 'node:os'
 import path from 'node:path'
 
 const tagOf = value => Object.prototype.toString.call(value).slice(8, -1)
+const MAX_DEPTH = 6
 
-export const isThenable = value =>
+/** One line of at most `max` characters, white space folded. */
+export const short = (text, max = 60) => {
+  const line = String(text).replace(/\s+/g, ' ').trim()
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line
+}
+
+const isThenable = value =>
   value !== null && (typeof value === 'object' || typeof value === 'function') && typeof value.then === 'function'
 export const isShellResult = value => value !== null && typeof value === 'object' && value.__lever === 'shell'
-export const isErrorLike = value => value !== null && typeof value === 'object' && tagOf(value) === 'Error'
+const isErrorLike = value => value !== null && typeof value === 'object' && tagOf(value) === 'Error'
 
 /** Waits for promises the code returned inside an object or array, so `({ tests: $`npm test` })` shows the result.
  * A promise that fails inside the value shows as its error; the top-level value is awaited by the caller. */
@@ -51,10 +58,10 @@ export function errorText(error) {
 }
 
 export function shellText(result, max = 4000) {
-  const out = (result.stdout ?? '').replace(/\s+$/, '')
+  const out = (result.stdout ?? '').trimEnd()
   if (result.exitCode === 0 && !result.signal) return out === '' ? '(exit 0, no output)' : cutMiddle(out, max)
   const status = result.signal ? `killed by ${result.signal}` : `exit ${result.exitCode}`
-  const err = (result.stderr ?? '').replace(/\s+$/, '')
+  const err = (result.stderr ?? '').trimEnd()
   const parts = [`${status}: ${result.command.length > 120 ? `${result.command.slice(0, 117)}…` : result.command}`]
   if (err) parts.push(cutMiddle(err, Math.floor(max * 0.6)))
   if (out) parts.push(cutMiddle(out, Math.floor(max * 0.4)))
@@ -62,7 +69,7 @@ export function shellText(result, max = 4000) {
 }
 
 /** A JSON-safe copy with long strings and arrays cut, cycles marked, and code-made objects summarised. */
-export function toPlain(value, { maxString = 2000, maxItems = 200, maxDepth = 6 } = {}) {
+export function toPlain(value, { maxString = 2000, maxItems = 200 } = {}) {
   const seen = new WeakSet()
   const walk = (v, depth) => {
     if (v === null || v === undefined) return v
@@ -79,14 +86,14 @@ export function toPlain(value, { maxString = 2000, maxItems = 200, maxDepth = 6 
       case 'symbol':
         return v.toString()
     }
-    if (isShellResult(v)) return v.exitCode === 0 ? walk(v.stdout.replace(/\s+$/, ''), depth) : shellText(v, maxString)
+    if (isShellResult(v)) return v.exitCode === 0 ? walk(v.stdout.trimEnd(), depth) : shellText(v, maxString)
     if (isErrorLike(v)) return errorText(v)
     if (ArrayBuffer.isView(v)) return `<${v.byteLength} bytes>`
     const tag = tagOf(v)
     if (tag === 'Date') return Number.isNaN(v.getTime()) ? 'Invalid Date' : v.toISOString()
     if (tag === 'RegExp') return String(v)
     if (seen.has(v)) return '[Circular]'
-    if (depth >= maxDepth) return Array.isArray(v) ? `[${v.length} items]` : '{…}'
+    if (depth >= MAX_DEPTH) return Array.isArray(v) ? `[${v.length} items]` : '{…}'
     seen.add(v)
     let out
     if (tag === 'Map') out = walk(Object.fromEntries(v), depth)
@@ -112,7 +119,7 @@ const indent = text => text.replace(/^/gm, '  ')
 const MORE = /^…\+\d+ more$/
 
 /** A grep() match, also after the code filtered or mapped the list. */
-export const isMatch = v =>
+const isMatch = v =>
   v !== null && typeof v === 'object' && typeof v.file === 'string' && typeof v.line === 'number' && typeof v.text === 'string'
 
 /** Matches the way grep prints them: `file:line:text`, context lines as `file-line-text`. */
@@ -148,8 +155,7 @@ export function render(value, limits = {}) {
   if (typeof value === 'string') return value
   if (isShellResult(value)) return shellText(value, limits.maxString ?? 4000)
   if (isErrorLike(value)) return errorText(value)
-  const allMatches = Array.isArray(value) && value.length > 0 && value.every(isMatch)
-  const plain = toPlain(value, allMatches ? { ...limits, maxItems: Infinity } : limits)
+  const plain = toPlain(value, limits)
   if (isPrimitive(plain)) return typeof plain === 'string' ? plain : JSON.stringify(plain)
   if (Array.isArray(plain)) {
     const list = listText(plain)
@@ -167,13 +173,13 @@ export function render(value, limits = {}) {
   return lines.join('\n')
 }
 
-/** Renders a value in at most `max` characters when it can. Nothing is cut when the whole text fits; otherwise the long
- * strings inside the value are cut in the middle, only as much as needed. `whole` is the uncut text. */
+/** Renders a value in at most `max` characters when it can. Nothing is cut when the whole text fits; otherwise long
+ * strings are cut in the middle and long lists shortened, only as much as needed. `whole` is the uncut text. */
 export function renderWithin(value, max) {
-  const whole = render(value, { maxString: Infinity })
+  const whole = render(value, { maxString: Infinity, maxItems: Infinity })
   let text = whole
   for (let maxString = max; text.length > max && maxString >= 200 && typeof value !== 'string'; maxString = Math.floor(maxString / 2)) {
-    text = render(value, { maxString })
+    text = render(value, { maxString, maxItems: Math.floor(maxString / 40) })
   }
   return { text, whole }
 }
@@ -182,7 +188,7 @@ let fallbackDir = null
 
 /** `dir` when it is a real folder owned by this user and closed to others (it is created that way when missing);
  * otherwise a fresh private folder. Another user on a shared /tmp cannot plant the folder or a link in its place. */
-export function privateDir(dir) {
+function privateDir(dir) {
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     const info = lstatSync(dir)
@@ -197,23 +203,28 @@ export function privateDir(dir) {
 }
 
 /** Saves `text` under `dir` with an unguessable name and returns the path, or null when it cannot be written. */
-export function spill(text, dir, label) {
+/** Writes data to a new file only this user can read, in the private folder `dir`. Throws when it cannot. */
+export function saveFile(data, dir, label, ext = 'txt') {
+  const file = path.join(privateDir(dir), `${label}-${randomBytes(4).toString('hex')}.${ext}`)
+  writeFileSync(file, data, { mode: 0o600, flag: 'wx' })
+  return file
+}
+
+/** saveFile for long replies: null when the file cannot be written, so the reply still goes out. */
+function spill(text, dir, label) {
   try {
-    const file = path.join(privateDir(dir), `${label}-${randomBytes(4).toString('hex')}.txt`)
-    writeFileSync(file, text, { mode: 0o600, flag: 'wx' })
-    return file
+    return saveFile(text, dir, label)
   } catch {
     return null
   }
 }
 
-/** Caps the whole reply. When it is cut, the full text goes to a file and the reply says where. */
 /** Caps a reply at maxOutput characters. When anything was left out, `whole` (the uncut text) goes to a file. */
 export function capReply(text, { maxOutput, spillDir, label, whole = text }) {
   if (text.length <= maxOutput && whole === text) return { text, file: null }
   const file = spill(whole, spillDir, label)
   const note = file ? ` · full text: ${file}` : ''
-  if (text.length <= maxOutput) return { text: `${text}\n…[long values cut in the middle${note}]`, file }
+  if (text.length <= maxOutput) return { text: `${text}\n…[long values shortened${note}]`, file }
   return { text: cutMiddle(text, maxOutput, note), file }
 }
 

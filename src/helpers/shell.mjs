@@ -2,6 +2,7 @@
 // The promise starts on the next microtask, so `.nothrow()` or `.timeout(ms)` chained right away still apply.
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 
 const OUTPUT_CAP = 16 * 1024 * 1024
@@ -15,7 +16,7 @@ export function quote(value) {
   return `'${text.replace(/'/g, "'\\''")}'`
 }
 
-export class ShellError extends Error {
+class ShellError extends Error {
   constructor(result) {
     const status = result.signal ? `killed by ${result.signal}` : `exit ${result.exitCode}`
     // Both ends can matter: npm writes its own note to stderr while the test report is on stdout.
@@ -30,12 +31,27 @@ export class ShellError extends Error {
   }
 }
 
-export class StepRefused extends Error {
+class StepRefused extends Error {
   constructor(step, reason) {
     super(`Refused ${step}: ${reason}`)
     this.name = 'StepRefused'
   }
 }
+
+/** Runs the checks for one step (guards, permission rules, PreToolUse hooks). A refusal is recorded as a step and
+ * thrown as StepRefused; otherwise it returns the verdict, whose `input` a hook may have replaced. */
+export async function checkStep(env, run, tool, input, label, { kind = tool.toLowerCase(), name = `${tool} ${label}` } = {}) {
+  const verdict = await env.guard.before(tool, input)
+  run.note(verdict.notes)
+  if (verdict.deny) {
+    run.step({ kind, label, ok: false, detail: 'refused' })
+    throw new StepRefused(name, verdict.deny)
+  }
+  return verdict
+}
+
+/** Home-relative paths (~ and ~/...) as absolute ones. */
+export const expandHome = input => (input === '~' || input.startsWith('~/') ? path.join(os.homedir(), input.slice(1)) : input)
 
 export function pickShell(preferred) {
   if (process.platform === 'win32') return { file: process.env.ComSpec || 'cmd.exe', args: command => ['/d', '/s', '/c', command] }
@@ -104,7 +120,6 @@ export function createShell(env) {
         return
       }
       env.onChild?.(child.pid, true)
-      run.children.add(child)
       const out = []
       const err = []
       let outBytes = 0
@@ -117,18 +132,17 @@ export function createShell(env) {
         errBytes += chunk.length
         if (errBytes <= OUTPUT_CAP) err.push(chunk)
       })
-      let timedOut = false
-      const timer = options.timeout
-        ? setTimeout(() => {
-            timedOut = true
-            killTree(child)
-            setTimeout(() => killTree(child, 'SIGKILL'), 2000).unref()
-          }, options.timeout)
-        : null
       const stop = () => {
         killTree(child)
         setTimeout(() => killTree(child, 'SIGKILL'), 2000).unref()
       }
+      let timedOut = false
+      const timer = options.timeout
+        ? setTimeout(() => {
+            timedOut = true
+            stop()
+          }, options.timeout)
+        : null
       run.signal.addEventListener('abort', stop, { once: true })
       let settled = false
       const finish = (exitCode, signal, error) => {
@@ -136,7 +150,6 @@ export function createShell(env) {
         settled = true
         if (timer) clearTimeout(timer)
         run.signal.removeEventListener('abort', stop)
-        run.children.delete(child)
         env.onChild?.(child.pid, false)
         let stderr = Buffer.concat(err).toString('utf8')
         if (error) stderr += `${stderr ? '\n' : ''}${error.message}`

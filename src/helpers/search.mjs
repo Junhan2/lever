@@ -2,13 +2,12 @@
 // Paths come back relative to the project folder, so they can go straight into read() or edit().
 import { spawn } from 'node:child_process'
 import { existsSync, promises as fs, statSync } from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
+import { types } from 'node:util'
 import { escapeRegExp, GLOB_CHARS, globRoot, globToRegExp } from '../glob.mjs'
-import { StepRefused } from './shell.mjs'
+import { checkStep, expandHome } from './shell.mjs'
 
 const LINE_MAX = 300
-const SKIP_DIRS = new Set(['.git', 'node_modules'])
 
 export function findRipgrep() {
   if (process.env.LEVER_RG === 'off') return null
@@ -75,7 +74,7 @@ async function* walk(dir, { hidden, ignored }) {
     return
   }
   for (const entry of entries) {
-    if (entry.name === '.git' || (!hidden && entry.name.startsWith('.')) || (!ignored && SKIP_DIRS.has(entry.name))) continue
+    if (entry.name === '.git' || (!hidden && entry.name.startsWith('.')) || (!ignored && entry.name === 'node_modules')) continue
     const child = dir ? `${dir.replace(/\/$/, '')}/${entry.name}` : entry.name
     if (entry.isDirectory()) yield* walk(child, { hidden, ignored })
     else if (entry.isFile()) yield child
@@ -85,38 +84,31 @@ async function* walk(dir, { hidden, ignored }) {
 /** env: { projectDir, guard, run(), rg } (rg: a path, null to use Node only, undefined to look on PATH) */
 export function createSearch(env) {
   const rg = env.rg === undefined ? findRipgrep() : env.rg
-  const expand = input => (input === '~' || input.startsWith('~/') ? path.join(os.homedir(), input.slice(1)) : input)
-  const absolute = input => path.resolve(env.projectDir, expand(input))
-  const common = options => {
+  const absolute = input => path.resolve(env.projectDir, expandHome(input))
+  // which files a search sees, the same for ripgrep and for the Node walk
+  const scopeOf = options => ({ hidden: Boolean(options.hidden || options.all), ignored: Boolean(options.ignored || options.all) })
+  const common = scope => {
     const args = ['--no-require-git', '--no-messages']
-    if (options.hidden || options.all) args.push('--hidden', '-g', '!.git')
-    if (options.ignored || options.all) args.push('--no-ignore')
+    if (scope.hidden) args.push('--hidden', '-g', '!.git')
+    if (scope.ignored) args.push('--no-ignore')
     return args
   }
 
   /** Leaves out what a permission rule keeps from being read, and says how many. */
   const visible = (items, fileOf, run) => {
-    if (!env.guard.hidden) return items
-    const kept = items.filter(item => !env.guard.hidden(absolute(fileOf(item))))
-    const dropped = new Set(items.filter(item => !kept.includes(item)).map(fileOf)).size
-    if (dropped) run.note([`left out ${dropped} file${dropped === 1 ? '' : 's'} that permission rules keep from being read`])
-    return kept
+    const hidden = new Set(items.map(fileOf).filter(file => env.guard.hidden(absolute(file))))
+    if (hidden.size === 0) return items
+    run.note([`left out ${hidden.size} file${hidden.size === 1 ? '' : 's'} that permission rules keep from being read`])
+    return items.filter(item => !hidden.has(fileOf(item)))
   }
 
-  const check = async (run, tool, input, label) => {
-    const verdict = await env.guard.before(tool, input)
-    run.note(verdict.notes)
-    if (verdict.deny) {
-      run.step({ kind: tool.toLowerCase(), label, ok: false, detail: 'refused' })
-      throw new StepRefused(`${tool} ${label}`, verdict.deny)
-    }
-  }
+  const check = (run, tool, input, label) => checkStep(env, run, tool, input, label)
 
   /** glob('src/**\/*.ts', { cwd, hidden, ignored, all, ignoreCase }) → sorted paths. Files only. */
   async function glob(pattern, options = {}) {
     if (typeof pattern !== 'string' || pattern === '') throw new TypeError('glob needs a pattern string')
     const run = env.run()
-    let full = toSlash(expand(pattern))
+    let full = toSlash(expandHome(pattern))
     if (options.cwd && !path.isAbsolute(full)) full = toSlash(path.join(options.cwd, full))
     full = stripDot(path.posix.normalize(full))
     const root = globRoot(full)
@@ -132,11 +124,10 @@ export function createSearch(env) {
         if (matcher.test(file)) files.push(file)
       }
       if (rg) {
-        const outcome = await ripgrep(rg, ['--files', ...common(options), '--', root || '.'], env.projectDir, keep)
+        const outcome = await ripgrep(rg, ['--files', ...common(scopeOf(options)), '--', root || '.'], env.projectDir, keep)
         if (outcome.code === 2 && files.length === 0 && outcome.stderr) run.note([`glob: ${outcome.stderr.split('\n')[0]}`])
       } else {
-        const base = root ? (path.isAbsolute(root) ? root : path.join(env.projectDir, root)) : env.projectDir
-        for await (const file of walk(base, options)) {
+        for await (const file of walk(path.resolve(env.projectDir, root), scopeOf(options))) {
           const shown = path.isAbsolute(root) ? file : toSlash(path.relative(env.projectDir, file))
           keep(shown)
         }
@@ -156,12 +147,12 @@ export function createSearch(env) {
   async function grep(pattern, options = {}) {
     const run = env.run()
     let ignoreCase = Boolean(options.ignoreCase ?? options.i)
-    if (pattern instanceof RegExp || Object.prototype.toString.call(pattern) === '[object RegExp]') {
+    if (types.isRegExp(pattern)) {
       ignoreCase ||= pattern.flags.includes('i')
       pattern = pattern.source
     }
     if (typeof pattern !== 'string' || pattern === '') throw new TypeError('grep needs a pattern (string or RegExp)')
-    const targets = [options.path ?? options.in ?? '.'].flat().map(target => stripDot(toSlash(expand(String(target)))) || '.')
+    const targets = [options.path ?? options.in ?? '.'].flat().map(target => stripDot(toSlash(expandHome(String(target)))) || '.')
     const mode = options.files ? 'files_with_matches' : options.count ? 'count' : 'content'
     const before = options.before ?? options.context ?? 0
     const after = options.after ?? options.context ?? 0
@@ -182,7 +173,7 @@ export function createSearch(env) {
 
     let result
     if (rg) {
-      const args = [...common(options)]
+      const args = common(scopeOf(options))
       if (ignoreCase) args.push('-i')
       if (options.fixed) args.push('-F')
       if (options.word) args.push('-w')
@@ -200,7 +191,7 @@ export function createSearch(env) {
           files.push(stripDot(toSlash(line)))
         })
         failIfBroken(outcome)
-        result = files.sort()
+        result = files
       } else {
         const counts = {}
         const outcome = await ripgrep(rg, ['--count-matches', '--with-filename', ...args, '--', ...targets], env.projectDir, line => {
@@ -208,14 +199,16 @@ export function createSearch(env) {
           counts[stripDot(toSlash(line.slice(0, at)))] = Number(line.slice(at + 1))
         })
         failIfBroken(outcome)
-        result = Object.fromEntries(Object.entries(counts).sort(([a], [b]) => (a < b ? -1 : 1)))
+        result = counts
       }
     } else {
       result = await nodeGrep(pattern, targets, { ...options, ignoreCase, before, after, max, mode, globs, run })
     }
 
-    if (Array.isArray(result)) result = visible(result, item => (typeof item === 'string' ? item : item.file), run)
-    else result = Object.fromEntries(visible(Object.entries(result), ([file]) => file, run))
+    if (Array.isArray(result)) {
+      result = visible(result, item => (typeof item === 'string' ? item : item.file), run)
+      if (mode === 'files_with_matches') result.sort()
+    } else result = Object.fromEntries(visible(Object.entries(result).sort(([a], [b]) => (a < b ? -1 : 1)), ([file]) => file, run))
     const size = Array.isArray(result) ? result.length : Object.keys(result).length
     run.step({ kind: 'grep', label, ok: true, detail: `${size} ${mode === 'content' ? 'matches' : 'files'}`, ms: Date.now() - started })
     const response =
@@ -281,7 +274,11 @@ export function createSearch(env) {
     if (options.multiline) throw new Error('grep { multiline } needs ripgrep (rg) on PATH')
     const source = options.fixed ? escapeRegExp(pattern) : pattern
     const regex = new RegExp(options.word ? `\\b(?:${source})\\b` : source, options.ignoreCase ? 'i' : '')
-    const fileFilters = options.globs.map(g => (g.startsWith('!') ? { not: true, re: globToRegExp(g.slice(1).includes('/') ? g.slice(1) : `**/${g.slice(1)}`) } : { not: false, re: globToRegExp(g.includes('/') ? g : `**/${g}`) }))
+    const fileFilters = options.globs.map(g => {
+      const not = g.startsWith('!')
+      const body = not ? g.slice(1) : g
+      return { not, re: globToRegExp(body.includes('/') ? body : `**/${body}`) }
+    })
     const wanted = file => {
       const positives = fileFilters.filter(f => !f.not)
       if (positives.length && !positives.some(f => f.re.test(file))) return false
@@ -341,7 +338,7 @@ export function createSearch(env) {
       }
       if (info.isFile()) await visit(target)
       else {
-        for await (const file of walk(full, options)) {
+        for await (const file of walk(full, scopeOf(options))) {
           const shown = path.isAbsolute(target) ? file : toSlash(path.relative(env.projectDir, file))
           if (wanted(shown)) await visit(shown)
           if (truncated) break
@@ -349,12 +346,8 @@ export function createSearch(env) {
       }
     }
     if (truncated) options.run.note([`grep stopped at ${options.max} matches; narrow the pattern or pass { max }`])
-    if (options.mode === 'files_with_matches') return files.sort()
-    if (options.mode === 'count') return Object.fromEntries(Object.entries(counts).sort(([a], [b]) => (a < b ? -1 : 1)))
-    return matches
+    return options.mode === 'files_with_matches' ? files : options.mode === 'count' ? counts : matches
   }
 
-  return { glob, grep, ripgrep: rg }
+  return { glob, grep }
 }
-
-export { globRoot, globToRegExp }

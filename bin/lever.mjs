@@ -10,7 +10,7 @@ import { accessSync, constants, mkdirSync, readFileSync, realpathSync, statSync 
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { configPath, loadConfig, NAME, VERSION } from '../src/config.mjs'
-import { loadHooks, settingsFiles } from '../src/guard.mjs'
+import { loadGuardModules, loadHooks, readSettings } from '../src/guard.mjs'
 import { serverList } from '../src/helpers/mcp.mjs'
 import { findRipgrep } from '../src/helpers/search.mjs'
 import { createRunner } from '../src/runner.mjs'
@@ -58,6 +58,13 @@ function runCommand(file, args, dryRun) {
   return { status: result.status ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? result.error?.message ?? '' }
 }
 
+/** Whether lever is already registered with this client. */
+const isRegistered = client =>
+  client === 'claude' ? runCommand('claude', ['mcp', 'get', NAME], false).status === 0 : new RegExp(`^${NAME}\\b`, 'm').test(runCommand('codex', ['mcp', 'list'], false).stdout)
+
+/** Claude Code takes a scope; Codex has one config. */
+const scopeArgs = (client, scope) => (client === 'claude' ? ['--scope', scope] : [])
+
 function targets() {
   const wanted = []
   if (flags.has('--claude')) wanted.push('claude')
@@ -77,27 +84,15 @@ function install() {
   }
   let failures = 0
   for (const client of list) {
-    if (client === 'claude') {
-      const exists = runCommand('claude', ['mcp', 'get', NAME], false).status === 0
-      if (exists && !flags.has('--force')) {
-        console.log(`claude: ${NAME} is already registered (use --force to replace it)`)
-        continue
-      }
-      if (exists) runCommand('claude', ['mcp', 'remove', NAME, '--scope', scope], dryRun)
-      const result = runCommand('claude', ['mcp', 'add', '--scope', scope, NAME, '--', node, bin], dryRun)
-      console.log(result.status === 0 ? `claude: registered ${NAME} (${scope} scope)` : `claude: failed: ${result.stderr.trim()}`)
-      failures += result.status === 0 ? 0 : 1
-    } else {
-      const exists = /^lever\b/m.test(runCommand('codex', ['mcp', 'list'], false).stdout)
-      if (exists && !flags.has('--force')) {
-        console.log(`codex: ${NAME} is already registered (use --force to replace it)`)
-        continue
-      }
-      if (exists) runCommand('codex', ['mcp', 'remove', NAME], dryRun)
-      const result = runCommand('codex', ['mcp', 'add', NAME, '--', node, bin], dryRun)
-      console.log(result.status === 0 ? `codex: registered ${NAME}` : `codex: failed: ${result.stderr.trim()}`)
-      failures += result.status === 0 ? 0 : 1
+    const exists = isRegistered(client)
+    if (exists && !flags.has('--force')) {
+      console.log(`${client}: ${NAME} is already registered (use --force to replace it)`)
+      continue
     }
+    if (exists) runCommand(client, ['mcp', 'remove', NAME, ...scopeArgs(client, scope)], dryRun)
+    const result = runCommand(client, ['mcp', 'add', ...scopeArgs(client, scope), NAME, '--', node, bin], dryRun)
+    console.log(result.status === 0 ? `${client}: registered ${NAME}${client === 'claude' ? ` (${scope} scope)` : ''}` : `${client}: failed: ${result.stderr.trim()}`)
+    if (result.status !== 0) failures++
   }
   return failures ? 1 : 0
 }
@@ -105,15 +100,14 @@ function install() {
 function uninstall() {
   const dryRun = flags.has('--dry-run')
   for (const client of targets()) {
-    const args = client === 'claude' ? ['mcp', 'remove', NAME, '--scope', option('--scope') ?? 'user'] : ['mcp', 'remove', NAME]
-    const result = runCommand(client, args, dryRun)
+    const result = runCommand(client, ['mcp', 'remove', NAME, ...scopeArgs(client, option('--scope') ?? 'user')], dryRun)
     console.log(`${client}: ${result.status === 0 ? 'removed' : `not removed: ${(result.stderr || result.stdout).trim()}`}`)
   }
   return 0
 }
 
 async function runOnce() {
-  const config = loadConfig({ projectDir: process.cwd() })
+  const config = loadConfig(process.cwd())
   let code
   if (rest[0] === '-e') code = rest[1]
   else if (rest[0] === '-' || rest[0] === undefined) code = readFileSync(0, 'utf8')
@@ -141,26 +135,16 @@ async function doctor() {
   ok(null, `config: ${configPath()}`)
   ok(null, `limits: reply ${config.maxOutput} chars, run ${config.timeoutMs / 1000} s, background ${config.backgroundTimeoutMs / 1000} s`)
   if (config.hooks === 'on') {
-    const hooks = loadHooks(config.projectDir)
-    const found = settingsFiles(config.projectDir).filter(file => {
-      try {
-        return statSync(file).isFile()
-      } catch {
-        return false
-      }
-    })
-    ok(true, `Claude Code hooks: on (${hooks.PreToolUse.length} PreToolUse, ${hooks.PostToolUse.length} PostToolUse from ${found.length} settings files)`)
+    const sources = readSettings(config.projectDir)
+    const hooks = loadHooks(config.projectDir, sources)
+    ok(true, `Claude Code hooks: on (${hooks.PreToolUse.length} PreToolUse, ${hooks.PostToolUse.length} PostToolUse from ${sources.length} settings files)`)
   } else ok(null, 'Claude Code hooks: off (set LEVER_HOOKS=on to run them outside Claude Code)')
-  for (const guard of config.guards) {
-    try {
-      const loaded = await import(path.isAbsolute(guard) ? `file://${guard}` : guard)
-      ok(typeof (loaded.default ?? loaded.check) === 'function', `guard ${guard}`)
-    } catch (error) {
-      ok(false, `guard ${guard}: ${error.message}`)
-    }
-  }
+  // loaded the way the server loads them, so a guard that passes here is one the server runs
+  const guardNotes = []
+  for (const guard of await loadGuardModules(config.guards, guardNotes)) ok(true, `guard ${guard.name}`)
+  for (const note of guardNotes) ok(false, note)
   const servers = Object.entries(serverList(config))
-  const usable = servers.filter(([, def]) => !def.skipped && (def.type ?? 'stdio') === 'stdio')
+  const usable = servers.filter(([, def]) => !def.skipped)
   ok(null, `MCP servers callable from code: ${usable.length ? usable.map(([name]) => name).join(', ') : 'none'}`)
   for (const [name, def] of servers.filter(([, d]) => d.skipped)) ok(null, `  ${name} skipped: ${def.skipped}`)
   try {
@@ -177,7 +161,7 @@ async function doctor() {
   ok(reply.text.startsWith('ok') && !reply.isError, `self-test run: ${reply.text.split('\n')[0]} in ${Date.now() - started} ms`)
   for (const client of ['claude', 'codex']) {
     if (!onPath(client)) continue
-    const registered = client === 'claude' ? runCommand('claude', ['mcp', 'get', NAME], false).status === 0 : /^lever\b/m.test(runCommand('codex', ['mcp', 'list'], false).stdout)
+    const registered = isRegistered(client)
     ok(registered ? true : null, `${client}: ${registered ? 'lever is registered' : 'lever is not registered (lever install)'}`)
   }
   console.log(`${NAME} ${VERSION}\n${lines.join('\n')}`)

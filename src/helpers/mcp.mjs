@@ -2,34 +2,25 @@
 // Claude Code's local and user settings, and the project's .mcp.json (only the servers Claude Code approved there).
 // Each server starts on first use and stays up for the session.
 import { spawn } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
-import { readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { VERSION } from '../config.mjs'
-import { privateDir } from '../format.mjs'
-import { killTree, StepRefused } from './shell.mjs'
+import { NAME, readJson, VERSION } from '../config.mjs'
+import { saveFile, short } from '../format.mjs'
+import { settingsFiles } from '../guard.mjs'
+import { checkStep, killTree } from './shell.mjs'
 
-const CLIENT = { name: 'lever', version: VERSION }
+const CLIENT = { name: NAME, version: VERSION }
 const OLD_PROTOCOL = '2025-11-25'
 const NEW_PROTOCOL = '2026-07-28'
 const META = 'io.modelcontextprotocol/'
 const START_TIMEOUT = 30_000
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'audio/wav': 'wav', 'audio/mpeg': 'mp3' }
 
-export class McpError extends Error {
+class McpError extends Error {
   constructor(message) {
     super(message)
     this.name = 'McpError'
-  }
-}
-
-const readJson = file => {
-  try {
-    return JSON.parse(readFileSync(file, 'utf8'))
-  } catch {
-    return null
   }
 }
 
@@ -41,21 +32,11 @@ export function expandVars(value) {
   )
 }
 
-function claudeFiles(projectDir) {
-  const home = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')
-  const state = process.env.CLAUDE_CONFIG_DIR ? path.join(process.env.CLAUDE_CONFIG_DIR, '.claude.json') : path.join(os.homedir(), '.claude.json')
-  return {
-    state,
-    user: path.join(home, 'settings.json'),
-    local: path.join(projectDir, '.claude', 'settings.local.json'),
-    all: [path.join(home, 'settings.json'), path.join(projectDir, '.claude', 'settings.json'), path.join(projectDir, '.claude', 'settings.local.json')],
-  }
-}
-
 /** The servers code may call, by name: { command, args, env, type, source } or { skipped: reason }. */
 export function serverList(config) {
-  const files = claudeFiles(config.projectDir)
-  const state = config.mcpImport?.includes('claude') ? readJson(files.state) ?? {} : {}
+  const [userSettings, projectSettings, localSettings] = settingsFiles(config.projectDir)
+  const stateFile = path.join(process.env.CLAUDE_CONFIG_DIR || os.homedir(), '.claude.json')
+  const state = config.mcpImport?.includes('claude') ? readJson(stateFile) ?? {} : {}
   const projectState = state.projects?.[config.projectDir] ?? {}
   const out = {}
   const add = (servers, source, check = () => null) => {
@@ -71,8 +52,8 @@ export function serverList(config) {
   if (config.mcpImport?.includes('project')) {
     // A cloned repository can ship its own .claude/settings.local.json, so that file counts only in a folder the user
     // already trusted in Claude Code.
-    const trusted = [files.user, ...(projectState.hasTrustDialogAccepted === true ? [files.local] : [])].map(readJson).filter(Boolean)
-    const rejected = new Set([...files.all.map(readJson).filter(Boolean), projectState].flatMap(s => s.disabledMcpjsonServers ?? []))
+    const trusted = [userSettings, ...(projectState.hasTrustDialogAccepted === true ? [localSettings] : [])].map(readJson).filter(Boolean)
+    const rejected = new Set([...[userSettings, projectSettings, localSettings].map(readJson).filter(Boolean), projectState].flatMap(s => s.disabledMcpjsonServers ?? []))
     const approved = name =>
       [...trusted, projectState].some(s => s.enableAllProjectMcpServers === true || (s.enabledMcpjsonServers ?? []).includes(name))
     add(readJson(path.join(config.projectDir, '.mcp.json'))?.mcpServers, '.mcp.json', name =>
@@ -83,6 +64,7 @@ export function serverList(config) {
   for (const [name, def] of Object.entries(out)) {
     const line = [def.command, ...(def.args ?? [])].join(' ')
     if (name === 'lever' || /\blever(?:\.mjs|-mcp)\b|bin\/lever\b/.test(line)) delete out[name]
+    else if (def.type && def.type !== 'stdio') out[name] = { skipped: `only stdio servers can be called from code (this one is ${def.type})`, source: def.source }
   }
   return out
 }
@@ -96,10 +78,9 @@ function paramsOf(schema) {
 }
 
 const firstSentence = text => {
-  const line = String(text ?? '').replace(/\s+/g, ' ').trim()
+  const line = short(text ?? '', Infinity)
   const end = line.search(/[.!?](\s|$)/)
-  const sentence = end === -1 ? line : line.slice(0, end + 1)
-  return sentence.length > 160 ? `${sentence.slice(0, 159)}…` : sentence
+  return short(end === -1 ? line : line.slice(0, end + 1), 160)
 }
 
 class Client {
@@ -131,9 +112,6 @@ class Client {
 
   async launch() {
     const def = this.def
-    if (def.type && def.type !== 'stdio') {
-      throw new McpError(`mcp.${this.name}: only stdio servers can be called from code (this one is ${def.type})`)
-    }
     if (!def.command) throw new McpError(`mcp.${this.name}: no command in its settings`)
     const envVars = Object.fromEntries(Object.entries(def.env ?? {}).map(([key, value]) => [key, expandVars(String(value))]))
     const child = spawn(expandVars(def.command), (def.args ?? []).map(arg => expandVars(String(arg))), {
@@ -168,9 +146,8 @@ class Client {
     child.stdin.on('error', () => {})
 
     try {
-      const init = await this.request('initialize', { protocolVersion: OLD_PROTOCOL, capabilities: { roots: { listChanged: false } }, clientInfo: CLIENT }, { timeoutMs: START_TIMEOUT })
+      await this.request('initialize', { protocolVersion: OLD_PROTOCOL, capabilities: { roots: { listChanged: false } }, clientInfo: CLIENT }, { timeoutMs: START_TIMEOUT })
       this.notify('notifications/initialized')
-      this.info = init?.serverInfo
     } catch (error) {
       if (error.code !== -32601) throw error
       this.modern = true // a server that only speaks the 2026-07-28 protocol
@@ -296,12 +273,7 @@ export function createMcp(env, config) {
     return clients.get(name)
   }
 
-  const saveMedia = (item, label) => {
-    const dir = privateDir(env.spillDir ?? path.join(os.tmpdir(), 'lever'))
-    const file = path.join(dir, `${label}-${randomBytes(4).toString('hex')}.${EXT[item.mimeType] ?? 'bin'}`)
-    writeFileSync(file, Buffer.from(item.data, 'base64'), { mode: 0o600, flag: 'wx' })
-    return file
-  }
+  const saveMedia = (item, label) => saveFile(Buffer.from(item.data, 'base64'), env.spillDir, label, EXT[item.mimeType] ?? 'bin')
 
   function toValue(result, label) {
     const items = result?.content ?? []
@@ -333,12 +305,7 @@ export function createMcp(env, config) {
   async function call(server, tool, args = {}) {
     const run = env.run()
     const label = `${server}.${tool}`
-    const verdict = await env.guard.before(`mcp__${server}__${tool}`, args)
-    run.note(verdict.notes)
-    if (verdict.deny) {
-      run.step({ kind: 'mcp', label, ok: false, detail: 'refused' })
-      throw new StepRefused(label, verdict.deny)
-    }
+    const verdict = await checkStep(env, run, `mcp__${server}__${tool}`, args, label, { kind: 'mcp', name: label })
     const input = verdict.input ?? args
     const started = Date.now()
     let result

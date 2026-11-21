@@ -103,18 +103,17 @@ export function createRunner(config) {
     const softLimitMs = !background && options.autoBackgroundMs > 0 ? options.autoBackgroundMs : null
     worker.postMessage({ type: 'run', id, code, timeoutMs: limit, softLimitMs })
     return new Promise(resolve => {
-      const entry = { id, resolve, worker, startedAt: Date.now(), timers: [], answered: false, fixedLimit: options.timeoutMs !== undefined, onStep: options.onStep }
+      const entry = { resolve, worker, startedAt: Date.now(), timers: [], answered: false, fixedLimit: options.timeoutMs !== undefined, onStep: options.onStep }
       pending.set(id, entry)
       entry.limitTimer = setTimeout(() => stop(id, `stopped after ${seconds(limit)}`), limit)
       entry.timers.push(entry.limitTimer)
       if (background) {
         answerEarly(id, `Started job ${id} in the background. Get its reply with: return await jobs.wait(${id})`)
-      } else if (options.autoBackgroundMs > 0) {
+      } else if (softLimitMs) {
         entry.timers.push(
           setTimeout(
-            () =>
-              answerEarly(id, `Still running after ${seconds(options.autoBackgroundMs)}, so it goes on in the background as job ${id}. Get its reply with: return await jobs.wait(${id})`),
-            options.autoBackgroundMs,
+            () => answerEarly(id, `Still running after ${seconds(softLimitMs)}, so it goes on in the background as job ${id}. Get its reply with: return await jobs.wait(${id})`),
+            softLimitMs,
           ),
         )
       }
@@ -134,7 +133,5 @@ export function createRunner(config) {
     killChildren()
   }
 
-  return { run, stop, close, get running() {
-    return pending.size
-  } }
+  return { run, close }
 }

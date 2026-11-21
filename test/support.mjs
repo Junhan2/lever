@@ -12,7 +12,6 @@ export function fakeRun(id = '1') {
     notes: [],
     journal: new Map(),
     bytesIn: 0,
-    children: new Set(),
     signal: controller.signal,
     abort: () => controller.abort(),
     note(list) {

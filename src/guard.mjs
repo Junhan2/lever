@@ -6,14 +6,21 @@
 // 2 and 3 are on when lever runs under Claude Code (config hooks: 'auto') or when hooks is 'on'.
 // A step is named after the Claude Code tool it stands for: Bash, Read, Write, Edit, Glob, Grep, mcp__server__tool.
 import { spawn } from 'node:child_process'
-import { readFileSync, statSync } from 'node:fs'
+import { statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { readJson } from './config.mjs'
+import { pickShell } from './helpers/shell.mjs'
 import { createRules } from './rules.mjs'
 
+const SESSION_ID = `lever-${process.pid}`
+
+/** Claude Code's settings folder. */
+const claudeDir = () => process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')
+
+/** User, project, local and managed settings, in that order. */
 export function settingsFiles(projectDir) {
-  const userDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')
   const managed =
     process.platform === 'darwin'
       ? '/Library/Application Support/ClaudeCode/managed-settings.json'
@@ -21,7 +28,7 @@ export function settingsFiles(projectDir) {
         ? 'C:\\Program Files\\ClaudeCode\\managed-settings.json'
         : '/etc/claude-code/managed-settings.json'
   return [
-    path.join(userDir, 'settings.json'),
+    path.join(claudeDir(), 'settings.json'),
     path.join(projectDir, '.claude', 'settings.json'),
     path.join(projectDir, '.claude', 'settings.local.json'),
     managed,
@@ -48,16 +55,11 @@ export function matcherMatches(matcher, toolName) {
 
 /** The settings files that exist, each with the folder its "/path" rules start from. */
 export function readSettings(projectDir) {
-  const userDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')
   const out = []
   for (const [index, file] of settingsFiles(projectDir).entries()) {
-    let data
-    try {
-      data = JSON.parse(readFileSync(file, 'utf8'))
-    } catch {
-      continue
-    }
-    out.push({ file, data, root: index === 0 ? userDir : projectDir, cwd: projectDir })
+    const data = readJson(file)
+    // the user's settings start "/path" rules at their own folder, the others at the project
+    if (data !== null) out.push({ file, data, root: index === 0 ? claudeDir() : projectDir, cwd: projectDir })
   }
   return out
 }
@@ -81,11 +83,10 @@ export function loadHooks(projectDir, sources = readSettings(projectDir)) {
 
 function runHook(hook, payload, cwd) {
   return new Promise(resolve => {
-    const shell = process.platform === 'win32' ? process.env.ComSpec || 'cmd.exe' : '/bin/sh'
-    const args = process.platform === 'win32' ? ['/d', '/s', '/c', hook.command] : ['-c', hook.command]
+    const shell = pickShell('/bin/sh')
     let child
     try {
-      child = spawn(shell, args, { cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: cwd }, stdio: 'pipe' })
+      child = spawn(shell.file, shell.args(hook.command), { cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: cwd }, stdio: 'pipe' })
     } catch (error) {
       resolve({ code: null, stdout: '', stderr: String(error) })
       return
@@ -139,7 +140,7 @@ export function readPreHook({ code, stdout, stderr }) {
 }
 
 /** Reads one PostToolUse hook run: exit 2's stderr and decision "block" are feedback for the model, as in Claude Code. */
-export function readPostHook({ code, stdout, stderr }) {
+function readPostHook({ code, stdout, stderr }) {
   const json = parseJson(stdout)
   const notes = []
   if (code === 2 && stderr.trim()) notes.push(stderr.trim())
@@ -148,7 +149,7 @@ export function readPostHook({ code, stdout, stderr }) {
   return notes
 }
 
-async function loadGuardModules(list, notes) {
+export async function loadGuardModules(list, notes) {
   const guards = []
   for (const entry of list) {
     try {
@@ -164,7 +165,7 @@ async function loadGuardModules(list, notes) {
   return guards
 }
 
-export function createGuard({ projectDir, hooks = 'off', guards = [], sessionId = `lever-${process.pid}` }) {
+export function createGuard({ projectDir, hooks = 'off', guards = [] }) {
   let modules = null
   const loadNotes = []
   let cached = null
@@ -193,6 +194,14 @@ export function createGuard({ projectDir, hooks = 'off', guards = [], sessionId 
     return cached
   }
 
+  /** Runs the hooks of one event that match the tool, with the documented JSON input; [] when none match. */
+  async function runHooks(hooks, event, tool, fields) {
+    const matching = hooks[event].filter(hook => matcherMatches(hook.matcher, tool))
+    if (matching.length === 0) return []
+    const payload = { session_id: SESSION_ID, cwd: projectDir, hook_event_name: event, tool_name: tool, ...fields, tool_use_id: `lever_${++toolUseCount}` }
+    return Promise.all(matching.map(hook => runHook(hook, payload, projectDir)))
+  }
+
   /** Before a step: { deny } refuses it; `notes` go to the model; `input` replaces the step's input when a hook says so. */
   async function before(tool, input) {
     modules ??= await loadGuardModules(guards, loadNotes)
@@ -212,19 +221,8 @@ export function createGuard({ projectDir, hooks = 'off', guards = [], sessionId 
     const settings = current()
     const refusal = settings.rules.check(tool, input)
     if (refusal) return { deny: refusal.deny, notes }
-    const matching = settings.hooks.PreToolUse.filter(hook => matcherMatches(hook.matcher, tool))
-    if (matching.length === 0) return { notes, input }
-    const payload = {
-      session_id: sessionId,
-      cwd: projectDir,
-      hook_event_name: 'PreToolUse',
-      tool_name: tool,
-      tool_input: input,
-      tool_use_id: `lever_${++toolUseCount}`,
-    }
-    const results = await Promise.all(matching.map(hook => runHook(hook, payload, projectDir)))
     let replaced = input
-    for (const result of results.map(readPreHook)) {
+    for (const result of (await runHooks(settings.hooks, 'PreToolUse', tool, { tool_input: input })).map(readPreHook)) {
       if (result.note) notes.push(result.note)
       if (result.deny) return { deny: result.deny, notes }
       if (result.input) replaced = result.input
@@ -234,23 +232,11 @@ export function createGuard({ projectDir, hooks = 'off', guards = [], sessionId 
 
   /** After a step that ran: notes from PostToolUse hooks. */
   async function after(tool, input, response) {
-    const matching = current().hooks.PostToolUse.filter(hook => matcherMatches(hook.matcher, tool))
-    if (matching.length === 0) return []
-    const payload = {
-      session_id: sessionId,
-      cwd: projectDir,
-      hook_event_name: 'PostToolUse',
-      tool_name: tool,
-      tool_input: input,
-      tool_response: response,
-      tool_use_id: `lever_${++toolUseCount}`,
-    }
-    const results = await Promise.all(matching.map(hook => runHook(hook, payload, projectDir)))
-    return results.flatMap(readPostHook)
+    return (await runHooks(current().hooks, 'PostToolUse', tool, { tool_input: input, tool_response: response })).flatMap(readPostHook)
   }
 
   /** True when a permission rule keeps this file from being read, so listings and search results leave it out. */
   const hidden = file => current().rules.hidden(file)
 
-  return { before, after, hidden, describe: () => ({ hooks, guards, settings: settingsFiles(projectDir), rules: current().rules.size }) }
+  return { before, after, hidden }
 }

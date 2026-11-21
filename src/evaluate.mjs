@@ -188,7 +188,7 @@ const IMPORT_LINE = /^\s*import\s+(?:(.+?)\s+from\s+)?(['"])([^'"]+)\2\s*;?\s*$/
 let importCount = 0
 
 /** `import x from 'y'` lines at the top of the code become `await import('y')` lines, one for one, so line numbers
- * stay right. Used only when the code does not compile as it is. Returns null when there is nothing to change. */
+ * stay right (such lines never compile inside the function body the code runs in). Returns null when there are none. */
 export function hoistImports(code) {
   const lines = code.split('\n')
   let changed = false
@@ -238,27 +238,14 @@ export function createEvaluator(globals = {}, { dir } = {}) {
     const name = `run-${++count}.js`
     const filename = dir ? path.join(dir, name) : name
     const options = { filename, lineOffset: -1, ...(importModuleDynamically ? { importModuleDynamically } : {}) }
-    let { source, returnsLast } = wrapCode(code)
-    let script
-    try {
-      script = new vm.Script(source, options)
-    } catch (error) {
-      const hoisted = /Cannot use import statement/.test(error.message) ? hoistImports(code) : null
-      if (!hoisted) return { filename, returnsLast, promise: Promise.reject(error) }
-      ;({ source, returnsLast } = wrapCode(hoisted))
-      try {
-        script = new vm.Script(source, options)
-      } catch (second) {
-        return { filename, returnsLast, promise: Promise.reject(second) }
-      }
-    }
     let promise
     try {
+      const script = new vm.Script(wrapCode(hoistImports(code) ?? code).source, options)
       promise = script.runInContext(context, { timeout: timeoutMs, breakOnSigint: false })
     } catch (error) {
       promise = Promise.reject(error)
     }
-    return { filename, returnsLast, promise }
+    return { filename, promise }
   }
 
   return { evaluate, context }

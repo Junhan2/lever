@@ -7,7 +7,7 @@ import path from 'node:path'
 import { formatWithOptions } from 'node:util'
 import { help } from './docs.mjs'
 import { createEvaluator } from './evaluate.mjs'
-import { bytes, capReply, errorText, isShellResult, render, renderWithin, seconds, settle, shellText } from './format.mjs'
+import { bytes, capReply, cutMiddle, errorText, isShellResult, render, renderWithin, seconds, settle, shellText, short } from './format.mjs'
 import { createGuard } from './guard.mjs'
 import { createFiles } from './helpers/files.mjs'
 import { createSearch } from './helpers/search.mjs'
@@ -17,16 +17,11 @@ const LOG_CAP = 1024 * 1024
 const KEEP_HISTORY = 20
 const KEEP_JOBS = 50
 
-export class RunStopped extends Error {
+class RunStopped extends Error {
   constructor(message) {
     super(message)
     this.name = 'RunStopped'
   }
-}
-
-const short = (text, max = 60) => {
-  const line = String(text).replace(/\s+/g, ' ').trim()
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line
 }
 
 /** events: { onChild(pid, added), onStep(runId, step), mcp(env) → mcp object } */
@@ -47,7 +42,6 @@ export function createSession(config, events = {}) {
       notes: [],
       journal: new Map(),
       bytesIn: 0,
-      children: new Set(),
       signal: controller.signal,
       abort(reason) {
         if (!controller.signal.aborted) controller.abort(reason)
@@ -70,7 +64,6 @@ export function createSession(config, events = {}) {
     projectDir: config.projectDir,
     guard: createGuard({ projectDir: config.projectDir, hooks: config.hooks, guards: config.guards }),
     shell: config.shell,
-    rg: config.rg,
     spillDir: config.spillDir,
     history,
     onChild: events.onChild,
@@ -86,14 +79,16 @@ export function createSession(config, events = {}) {
   const search = createSearch(env)
   const mcp = events.mcp?.(env)
 
-  const show = value => (isShellResult(value) ? shellText(value) : value)
+  // Logs are kept whole (up to LOG_CAP a run); the reply cuts them, like the returned value, only when it has to.
+  const show = value => (isShellResult(value) ? shellText(value, Infinity) : value)
   const logger = level => (...args) => {
     const run = als.getStore() ?? outside
-    const text = formatWithOptions({ depth: 4, maxArrayLength: 100, maxStringLength: 20_000, breakLength: 160 }, ...args.map(show))
-    if (run.logSize + text.length > LOG_CAP) {
+    const room = LOG_CAP - run.logSize
+    if (room <= 0) {
       run.logsDropped++
       return
     }
+    const text = cutMiddle(formatWithOptions({ depth: 4, maxArrayLength: 100, maxStringLength: Infinity, breakLength: 160 }, ...args.map(show)), room)
     run.logSize += text.length
     run.logs.push(level ? `[${level}] ${text}` : text)
   }
@@ -190,7 +185,7 @@ export function createSession(config, events = {}) {
     { dir: config.projectDir },
   )
 
-  async function remember(run) {
+  function remember(run) {
     if (run.journal.size === 0) return
     const after = new Map()
     for (const file of run.journal.keys()) after.set(file, existsSync(file) ? readFileSync(file) : null)
@@ -267,7 +262,7 @@ export function createSession(config, events = {}) {
     } catch (thrown) {
       error = thrown ?? new Error('the code threw undefined')
     }
-    await remember(run)
+    remember(run)
     return compose(run, code, filename, value, error)
   }
 

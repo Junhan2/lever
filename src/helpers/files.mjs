@@ -1,11 +1,10 @@
 // read / write / edit / exists / ls, plus the undo journal. Every change keeps the file's earlier content so undo()
 // can put it back; writes keep the file's mode because they rewrite it in place.
 import { promises as fs } from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
-import { StepRefused } from './shell.mjs'
+import { checkStep, expandHome } from './shell.mjs'
 
-export class EditError extends Error {
+class EditError extends Error {
   constructor(message) {
     super(message)
     this.name = 'EditError'
@@ -37,30 +36,18 @@ function missHint(text, old) {
 export function createFiles(env) {
   const absolute = input => {
     if (typeof input !== 'string' || input === '') throw new TypeError('A path must be a non-empty string')
-    const expanded = input === '~' || input.startsWith('~/') ? path.join(os.homedir(), input.slice(1)) : input
-    return path.resolve(env.projectDir, expanded)
+    return path.resolve(env.projectDir, expandHome(input))
   }
   const shown = file => {
     const relative = path.relative(env.projectDir, file)
     return relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? relative : file
   }
 
-  const check = async (run, tool, input, label) => {
-    const verdict = await env.guard.before(tool, input)
-    run.note(verdict.notes)
-    if (verdict.deny) {
-      run.step({ kind: tool.toLowerCase(), label, ok: false, detail: 'refused' })
-      throw new StepRefused(`${tool} ${label}`, verdict.deny)
-    }
-  }
+  const check = (run, tool, input, label) => checkStep(env, run, tool, input, label)
 
   const remember = async (run, file) => {
     if (run.journal.has(file)) return
-    try {
-      run.journal.set(file, await fs.readFile(file))
-    } catch {
-      run.journal.set(file, null) // the file did not exist before this run
-    }
+    run.journal.set(file, await fs.readFile(file).catch(() => null)) // null: the file did not exist before this run
   }
 
   async function read(input, options = {}) {
@@ -146,11 +133,12 @@ export function createFiles(env) {
           throw new EditError(`edit(${shown(file)}): text found ${count} times (lines ${lines.join(', ')}); add context or pass { all: true }`)
         }
         text = options.all ? text.split(oldText).join(newText) : text.replace(oldText, () => newText)
-        replaced += options.all ? count : 1
+        const times = options.all ? count : 1
+        replaced += times
         const oldLines = oldText.split('\n').length
         const newLines = newText.split('\n').length
-        added += Math.max(0, newLines - oldLines) * (options.all ? count : 1)
-        removed += Math.max(0, oldLines - newLines) * (options.all ? count : 1)
+        added += Math.max(0, newLines - oldLines) * times
+        removed += Math.max(0, oldLines - newLines) * times
       }
     }
     if (text === original) {
@@ -198,13 +186,8 @@ export function createFiles(env) {
     const skipped = []
     for (const [file, before] of target.journal) {
       const written = target.after.get(file)
-      let now = null
-      try {
-        now = await fs.readFile(file)
-      } catch {
-        now = null
-      }
-      const unchangedSince = written === undefined || (now === null ? written === null : written !== null && now.equals(written))
+      const now = await fs.readFile(file).catch(() => null)
+      const unchangedSince = now === null ? written === null : written !== null && now.equals(written)
       if (!unchangedSince && !force) {
         skipped.push(shown(file))
         continue
@@ -222,5 +205,5 @@ export function createFiles(env) {
     return { run: target.id, restored, skipped }
   }
 
-  return { read, write, edit, exists, ls, undo, absolute, shown }
+  return { read, write, edit, exists, ls, undo }
 }

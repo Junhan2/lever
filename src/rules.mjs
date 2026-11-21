@@ -8,7 +8,7 @@
 import { lstatSync, readlinkSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { globToRegExp } from './glob.mjs'
+import { escapeRegExp, globToRegExp } from './glob.mjs'
 
 const WRAPPERS = new Set(['timeout', 'time', 'nice', 'nohup', 'stdbuf', 'command', 'builtin', 'noglob'])
 const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '('])
@@ -17,18 +17,23 @@ const READ_TOOLS = new Set(['Read', 'Glob', 'Grep'])
 const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
 // macOS and Windows file systems ignore case by default, so .ENV opens .env there
 const IGNORE_CASE = process.platform === 'darwin' || process.platform === 'win32'
+const fold = text => (IGNORE_CASE ? text.toLowerCase() : text)
 
 /** "Tool" or "Tool(specifier)". */
-export function parseRule(text) {
+function parseRule(text) {
   const match = /^([^(]+?)(?:\((.*)\))?$/s.exec(String(text).trim())
   return match ? { tool: match[1].trim(), spec: match[2] === undefined ? null : match[2].trim(), text: String(text).trim() } : null
 }
 
-function toolMatches(ruleTool, tool) {
-  if (ruleTool === tool) return true
-  if (ruleTool.includes('*')) return new RegExp(`^${ruleTool.split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`).test(tool)
-  // mcp__server covers every tool of that server
-  return ruleTool.startsWith('mcp__') && tool.startsWith(`${ruleTool}__`)
+const starSource = text => text.split('*').map(escapeRegExp).join('.*')
+
+/** A rule's tool name as a test on a tool name: exact, a * glob, or mcp__server for every tool of that server. */
+function toolTest(ruleTool) {
+  if (ruleTool.includes('*')) {
+    const regex = new RegExp(`^${starSource(ruleTool)}$`)
+    return tool => regex.test(tool)
+  }
+  return tool => tool === ruleTool || (ruleTool.startsWith('mcp__') && tool.startsWith(`${ruleTool}__`))
 }
 
 /** The simple commands inside a shell command line: split at && || ; | |& & and newlines outside quotes, with the
@@ -127,20 +132,22 @@ function simplify(piece) {
   }
 }
 
-function bashMatches(spec, command) {
-  if (spec === null || spec === '' || spec === '*') return true
+/** A Bash rule's specifier as a test on the simple commands of one command line (from bashPieces). */
+function bashTest(spec) {
+  if (spec === '') return () => true
+  // "tool:arg" without a trailing :* is not a command pattern
+  if (/^[A-Za-z_]+\s*:/.test(spec) && !/:\*$/.test(spec)) return () => false
   const pattern = spec.endsWith(':*') ? `${spec.slice(0, -2)} *` : spec
   const stars = pattern.split('*').length - 1
-  if (stars === 0) return bashPieces(command).some(piece => piece === pattern)
-  let source = pattern.split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')
+  if (stars === 0) return pieces => pieces.includes(pattern)
+  let source = starSource(pattern)
   if (stars === 1 && pattern.endsWith(' *')) source = `${source.slice(0, -3)}(?: .*)?` // "ls *" also matches "ls"
-  let regex
   try {
-    regex = new RegExp(`^${source}$`, 's')
+    const regex = new RegExp(`^${source}$`, 's')
+    return pieces => pieces.some(piece => regex.test(piece))
   } catch {
-    return false
+    return () => false
   }
-  return bashPieces(command).some(piece => regex.test(piece))
 }
 
 function compilePath(spec, source) {
@@ -148,7 +155,7 @@ function compilePath(spec, source) {
   const negate = text.startsWith('!')
   if (negate) text = text.slice(1)
   let anchor
-  let relativeForm = false
+  let relative = false
   if (!negate && text.startsWith('//')) {
     anchor = '/'
     text = text.slice(2)
@@ -161,22 +168,20 @@ function compilePath(spec, source) {
   } else {
     anchor = source.cwd
     text = text.replace(/^\.\//, '')
-    relativeForm = true
+    relative = true
   }
   const trimmed = text.replace(/\/$/, '')
-  const relative = relativeForm
   // gitignore: a name without a slash matches at any depth; a deny or ask rule like secrets/** also does
   const anyDepth = !trimmed.includes('/') || (relative && /^[^/*]+\/\*\*$/.test(trimmed))
   const pattern = anyDepth && !trimmed.startsWith('**/') ? `**/${trimmed}` : trimmed
   // folder/** also covers the folder itself, so a search that starts there is stopped too
   const options = { ignoreCase: IGNORE_CASE }
   const folder = pattern.endsWith('/**') && pattern.length > 3 ? globToRegExp(pattern.slice(0, -3), options) : null
-  return { negate, anchor, regex: globToRegExp(pattern, options), folder }
+  return { negate, anchor: fold(anchor), regex: globToRegExp(pattern, options), folder }
 }
 
 function pathMatches(compiled, file) {
-  const fold = text => (IGNORE_CASE ? text.toLowerCase() : text)
-  const relative = path.relative(fold(compiled.anchor), fold(file)).split(path.sep).join('/')
+  const relative = path.relative(compiled.anchor, fold(file)).split(path.sep).join('/')
   if (relative.startsWith('..') || path.isAbsolute(relative)) return false
   const parts = relative.split('/')
   // the path itself, or a folder above it (a matched folder covers what is inside)
@@ -225,7 +230,7 @@ export function resolvePath(file) {
   return current
 }
 
-/** sources: [{ file, root, cwd, data }] from the settings files. */
+/** sources: [{ file, root, cwd, data }] from the settings files. Each rule is compiled once, here. */
 export function createRules(sources) {
   const lists = []
   for (const source of sources) {
@@ -234,29 +239,31 @@ export function createRules(sources) {
       // MCP rules with parentheses are skipped by Claude Code too
       const usable = rules.filter(rule => !(rule.tool.startsWith('mcp__') && rule.spec !== null))
       for (const rule of usable) {
-        if (rule.spec !== null && rule.spec !== '*' && (rule.tool === 'Read' || rule.tool === 'Edit')) rule.path = compilePath(rule.spec, source)
+        const bare = rule.spec === null || rule.spec === '*'
+        rule.matchesTool = toolTest(rule.tool)
+        if (!bare && (rule.tool === 'Read' || rule.tool === 'Edit')) rule.path = compilePath(rule.spec, source)
+        else if (!bare && rule.tool !== '*' && rule.matchesTool('Bash')) rule.bash = bashTest(rule.spec)
       }
       if (usable.length) lists.push({ kind, file: source.file, rules: usable })
     }
   }
 
-  const hasReadPaths = lists.some(list => list.rules.some(rule => rule.path && rule.tool === 'Read'))
+  const some = test => lists.some(list => list.rules.some(test))
+  const hasBashRules = some(rule => rule.bash)
+  const hasPathRules = some(rule => rule.path)
+  const hasReadPaths = some(rule => rule.path && rule.tool === 'Read')
 
-  /** The first rule that stops `file` for the given use ('read' or 'edit'), honouring ! carve-outs within one list. */
-  function pathRule(kind, use, file, resolve = true) {
-    // A step is checked against the path as written and where it really leads; a path that cannot be resolved is
-    // refused by any rule that could apply. Search results are only compared as written (resolve false), for speed.
-    const real = resolve ? resolvePath(file) : file
-    const candidates = real === null ? [] : real === file ? [file] : [file, real]
+  /** The first rule that stops a file for the given use ('read' or 'edit'), honouring ! carve-outs within one list.
+   * `candidates` are the path as written and where it really leads; null when it cannot be resolved, which any rule
+   * that could apply refuses. */
+  function pathRule(kind, use, candidates) {
     for (const list of lists) {
       if (list.kind !== kind) continue
       let hit = null
       for (const rule of list.rules) {
-        if (!rule.path) continue
         // Read rules cover edits too: an edit's errors tell what the file holds
-        const applies = rule.tool === 'Edit' ? use === 'edit' : use === 'read' || use === 'edit'
-        if (!applies) continue
-        const matched = real === null ? !rule.path.negate : candidates.some(candidate => pathMatches(rule.path, candidate))
+        if (!rule.path || (rule.tool === 'Edit' && use !== 'edit')) continue
+        const matched = candidates === null ? !rule.path.negate : candidates.some(candidate => pathMatches(rule.path, candidate))
         if (rule.path.negate) {
           if (hit && matched) hit = null
         } else if (matched && !hit) hit = rule
@@ -266,42 +273,46 @@ export function createRules(sources) {
     return null
   }
 
-  function find(kind, tool, input) {
+  function find(kind, tool, step) {
     for (const list of lists) {
       if (list.kind !== kind) continue
       for (const rule of list.rules) {
         if (rule.path) continue
-        const bare = rule.spec === null || rule.spec === '*'
-        if (tool === 'Bash' && toolMatches(rule.tool, 'Bash') && rule.tool !== '*' && !bare) {
-          if (!/^[A-Za-z_]+\s*:/.test(rule.spec) || /:\*$/.test(rule.spec)) {
-            if (bashMatches(rule.spec, String(input?.command ?? ''))) return { rule, file: list.file }
-          }
+        if (rule.bash) {
+          if (tool === 'Bash' && rule.bash(step.pieces)) return { rule, file: list.file }
           continue
         }
+        const bare = rule.spec === null || rule.spec === '*'
         const family = (rule.tool === 'Edit' && EDIT_TOOLS.has(tool)) || (rule.tool === 'Read' && READ_TOOLS.has(tool))
-        if (bare && (family || toolMatches(rule.tool, tool))) return { rule, file: list.file }
+        if (bare && (family || rule.matchesTool(tool))) return { rule, file: list.file }
       }
     }
-    const use = READ_TOOLS.has(tool) ? 'read' : EDIT_TOOLS.has(tool) ? 'edit' : null
-    const target = input?.file_path ?? input?.path
-    if (use && typeof target === 'string') return pathRule(kind, use, target)
-    return null
+    return step.path ? pathRule(kind, step.path.use, step.path.candidates) : null
   }
 
   return {
-    size: lists.reduce((sum, list) => sum + list.rules.length, 0),
     /** { deny } when a deny or ask rule stops this step, else null. */
     check(tool, input) {
-      const denied = find('deny', tool, input)
+      // What the rules compare, worked out once for the step: the simple commands, and the path as written and where
+      // it really leads.
+      const step = { pieces: tool === 'Bash' && hasBashRules ? bashPieces(String(input?.command ?? '')) : [] }
+      const use = READ_TOOLS.has(tool) ? 'read' : EDIT_TOOLS.has(tool) ? 'edit' : null
+      const target = input?.file_path ?? input?.path
+      if (use && typeof target === 'string' && hasPathRules) {
+        const real = resolvePath(target)
+        step.path = { use, candidates: real === null ? null : real === target ? [target] : [target, real] }
+      }
+      const denied = find('deny', tool, step)
       if (denied) return { deny: `the permission rule ${denied.rule.text} in ${denied.file} refuses this step` }
-      const asked = find('ask', tool, input)
+      const asked = find('ask', tool, step)
       if (asked) return { deny: `the permission rule ${asked.rule.text} in ${asked.file} wants a person to approve this step; make it as a normal tool call instead` }
       return null
     },
-    /** True when reading this file is refused, so search results and listings can leave it out. */
+    /** True when reading this file is refused, so search results and listings can leave it out. Compared as written,
+     * without following links, for speed. */
     hidden(file) {
       if (!hasReadPaths) return false
-      return Boolean(pathRule('deny', 'read', file, false) ?? pathRule('ask', 'read', file, false))
+      return Boolean(pathRule('deny', 'read', [file]) ?? pathRule('ask', 'read', [file]))
     },
   }
 }

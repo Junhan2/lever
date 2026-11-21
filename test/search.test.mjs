@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import { render } from '../src/format.mjs'
-import { createSearch, findRipgrep, globRoot, globToRegExp } from '../src/helpers/search.mjs'
+import { globRoot, globToRegExp } from '../src/glob.mjs'
+import { createSearch, findRipgrep } from '../src/helpers/search.mjs'
 import { makeEnv, project } from './support.mjs'
 
 test('glob patterns follow shell rules', () => {

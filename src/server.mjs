@@ -5,13 +5,13 @@ import { NAME, VERSION } from './config.mjs'
 import { INSTRUCTIONS, TOOL_DESCRIPTION } from './docs.mjs'
 import { createRunner } from './runner.mjs'
 
-export const PROTOCOL_VERSIONS = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']
+const PROTOCOL_VERSIONS = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']
 const INITIALIZE_LATEST = '2025-11-25' // the newest version that still uses initialize
 const META = 'io.modelcontextprotocol/'
 const CACHE = { ttlMs: 3_600_000, cacheScope: 'public' }
 const HEARTBEAT = 15_000
 
-export const RUN_TOOL = {
+const RUN_TOOL = {
   name: 'run',
   title: 'Run JavaScript',
   description: TOOL_DESCRIPTION,
@@ -32,7 +32,7 @@ export const RUN_TOOL = {
 }
 
 /** Claude Code moves long tool calls to the background by itself; other clients (Codex: 60 s) need lever to. */
-export function autoBackgroundFor(clientName, configured) {
+function autoBackgroundFor(clientName, configured) {
   if (configured !== null && configured !== undefined) return configured
   return /claude/i.test(clientName ?? '') ? 0 : 50_000
 }
