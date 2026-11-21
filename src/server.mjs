@@ -26,6 +26,9 @@ export const RUN_TOOL = {
     additionalProperties: false,
   },
   annotations: { title: 'Run JavaScript', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  // Claude Code defers MCP tools behind tool search by default; run is the tool for most steps, so it loads up front and
+  // the first use costs no extra search turn (https://code.claude.com/docs/en/mcp#mark-a-tool-to-load-upfront-or-stay-deferred).
+  _meta: { 'anthropic/alwaysLoad': true },
 }
 
 /** Claude Code moves long tool calls to the background by itself; other clients (Codex: 60 s) need lever to. */

@@ -64,6 +64,7 @@ test('initialize, tools/list and tools/call over stdio', async () => {
   const list = await client.request('tools/list', {})
   assert.deepEqual(list.result.tools.map(tool => tool.name), ['run'])
   assert.ok(list.result.tools[0].description.length < 2200)
+  assert.equal(list.result.tools[0]._meta['anthropic/alwaysLoad'], true)
   const call = await client.request('tools/call', { name: 'run', arguments: { code: "(await read('a.txt')).trim() + ' ' + (await $`echo beta`.text())" } })
   assert.equal(call.result.isError, false)
   assert.equal(call.result.content[0].text.split('\n---\n')[0], 'alpha beta')
