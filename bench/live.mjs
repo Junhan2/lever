@@ -1,7 +1,8 @@
-// The same requests sent to real Claude Code: once with only the built-in tools, once with only lever's run. Tokens,
-// cost, time and turns come from Claude Code's own JSON result, and each answer is checked. It calls the model, so it
-// is not part of npm test: node bench/live.mjs [model] [repeats] (default haiku, 3). Every request works on its own copy
-// of this repository, and each row shows the median of the repeats.
+// The same requests sent to real Claude Code three ways: with only the built-in tools, with the built-in tools and
+// lever (the way people install it), and with only lever's run. Tokens, cost, time and turns come from Claude Code's own
+// result, the tool calls from its event stream, and each answer is checked. It calls the model, so it is not part of
+// npm test: node bench/live.mjs [model] [repeats] (default haiku, 3). Every request works on its own copy of this
+// repository, and each row shows the median of the repeats.
 import { spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
@@ -12,6 +13,12 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const MODEL = process.argv[2] ?? 'haiku'
 const REPEATS = Number(process.argv[3] ?? 3)
 const BUILT_IN = ['Glob', 'Grep', 'Read', 'Edit', 'Write', 'Bash']
+const LEVER = 'mcp__lever__run'
+const WAYS = [
+  { name: 'built-in tools', lever: false, flags: () => ['--allowedTools', ...BUILT_IN] },
+  { name: 'built-in tools + lever', lever: true, flags: () => ['--allowedTools', ...BUILT_IN, LEVER] },
+  { name: 'lever only', lever: true, flags: () => ['--allowedTools', LEVER, '--disallowedTools', ...BUILT_IN] },
+]
 
 function copyRepo() {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'lever-live-'))
@@ -68,22 +75,30 @@ const TASKS = [
   },
 ]
 
-function ask(dir, prompt, withLever) {
-  // The config lives outside the copy, so the copy holds only the project files the checks compare.
-  const config = path.join(mkdtempSync(path.join(os.tmpdir(), 'lever-live-config-')), 'mcp.json')
-  const server = { command: process.execPath, args: [path.join(ROOT, 'bin', 'lever.mjs')], env: { CLAUDE_PROJECT_DIR: dir } }
-  writeFileSync(config, JSON.stringify({ mcpServers: { lever: server } }))
+function ask(dir, prompt, way) {
   // The prompt comes first: --allowedTools and --disallowedTools take several values and would swallow it.
-  const args = ['-p', prompt, '--model', MODEL, '--output-format', 'json', '--strict-mcp-config']
-  if (withLever) args.push('--mcp-config', config, '--allowedTools', 'mcp__lever__run', '--disallowedTools', ...BUILT_IN)
-  else args.push('--allowedTools', ...BUILT_IN)
-  const started = Date.now()
-  const out = spawnSync('claude', args, { cwd: dir, encoding: 'utf8', input: '', timeout: 600_000 })
-  try {
-    return { ...JSON.parse(out.stdout), wall: Date.now() - started }
-  } catch {
-    return { error: (out.stderr || out.stdout).slice(0, 400), wall: Date.now() - started }
+  const args = ['-p', prompt, '--model', MODEL, '--output-format', 'stream-json', '--verbose', '--strict-mcp-config']
+  if (way.lever) {
+    // The config lives outside the copy, so the copy holds only the project files the checks compare.
+    const config = path.join(mkdtempSync(path.join(os.tmpdir(), 'lever-live-config-')), 'mcp.json')
+    const server = { command: process.execPath, args: [path.join(ROOT, 'bin', 'lever.mjs')], env: { CLAUDE_PROJECT_DIR: dir } }
+    writeFileSync(config, JSON.stringify({ mcpServers: { lever: server } }))
+    args.push('--mcp-config', config)
   }
+  args.push(...way.flags())
+  const started = Date.now()
+  const out = spawnSync('claude', args, { cwd: dir, encoding: 'utf8', input: '', timeout: 600_000, maxBuffer: 64 * 1024 * 1024 })
+  const events = out.stdout.split('\n').flatMap(line => {
+    try {
+      return [JSON.parse(line)]
+    } catch {
+      return []
+    }
+  })
+  const calls = events.filter(e => e.type === 'assistant').flatMap(e => (e.message?.content ?? []).filter(c => c.type === 'tool_use').map(c => c.name))
+  const result = events.findLast(e => e.type === 'result')
+  if (!result) return { error: (out.stderr || out.stdout).slice(0, 400), calls, wall: Date.now() - started }
+  return { ...result, calls, wall: Date.now() - started }
 }
 
 const median = values => {
@@ -95,38 +110,57 @@ const median = values => {
 
 const rows = []
 for (const task of TASKS) {
-  for (const withLever of [false, true]) {
+  for (const way of WAYS) {
     const runs = []
     for (let i = 0; i < REPEATS; i++) {
       const dir = copyRepo()
       task.prepare?.(dir)
-      const result = ask(dir, task.prompt, withLever)
+      const result = ask(dir, task.prompt, way)
       const usage = result.usage ?? {}
+      const answer = String(result.result ?? '')
       runs.push({
         turns: result.num_turns,
+        calls: result.calls.length,
+        usedLever: result.calls.includes(LEVER),
         input: (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0),
         output: usage.output_tokens ?? 0,
         cost: result.total_cost_usd,
         seconds: (result.duration_ms ?? result.wall) / 1000,
-        correct: !result.error && result.is_error !== true && task.check(dir, String(result.result ?? '')),
-        error: result.error,
+        correct: !result.error && result.is_error !== true && task.check(dir, answer),
       })
-      console.error(`${task.name} · ${withLever ? 'lever' : 'built-in'} · run ${i + 1}: ${runs.at(-1).correct ? 'correct' : `wrong${result.error ? ` (${result.error})` : `: ${String(result.result ?? '').slice(0, 200)}`}`}`)
+      const run = runs.at(-1)
+      console.error(`${task.name} · ${way.name} · run ${i + 1}: ${run.correct ? 'correct' : `wrong${result.error ? ` (${result.error})` : `: ${answer.slice(0, 200)}`}`} · calls: ${result.calls.join(', ') || 'none'}`)
     }
     const pick = key => median(runs.map(run => run[key]))
-    rows.push({ task: task.name, way: withLever ? 'lever run' : 'built-in tools', turns: pick('turns'), input: pick('input'), output: pick('output'), cost: pick('cost'), seconds: pick('seconds'), correct: `${runs.filter(r => r.correct).length}/${runs.length}` })
+    rows.push({
+      task: task.name,
+      way: way.name,
+      turns: pick('turns'),
+      calls: pick('calls'),
+      usedLever: way.lever ? `${runs.filter(r => r.usedLever).length}/${runs.length}` : '-',
+      input: pick('input'),
+      output: pick('output'),
+      cost: pick('cost'),
+      seconds: pick('seconds'),
+      correct: `${runs.filter(r => r.correct).length}/${runs.length}`,
+    })
   }
 }
 
 const n = value => (value === undefined ? '?' : Math.round(value).toLocaleString('en-US'))
 console.log(`Claude Code ${spawnSync('claude', ['--version'], { encoding: 'utf8' }).stdout.trim()}, model ${MODEL}, median of ${REPEATS} runs per row. Input tokens include cached ones.\n`)
-console.log('| Task | Way | Turns | Input tokens | Output tokens | Cost (USD) | Time (s) | Correct |')
-console.log('| :- | :- | -: | -: | -: | -: | -: | :-: |')
-for (const r of rows) console.log(`| ${r.task} | ${r.way} | ${r.turns ?? '?'} | ${n(r.input)} | ${n(r.output)} | ${r.cost?.toFixed(4) ?? '?'} | ${r.seconds?.toFixed(1) ?? '?'} | ${r.correct} |`)
-const total = (way, key) => rows.filter(r => r.way === way).reduce((sum, r) => sum + (r[key] ?? 0), 0)
-const change = key => {
-  const before = total('built-in tools', key)
-  const after = total('lever run', key)
-  return `${key} ${n(before)} → ${n(after)} (${before ? `${((after / before - 1) * 100).toFixed(0)}%` : '?'})`
+console.log('| Task | Way | Turns | Tool calls | Used lever | Input tokens | Output tokens | Cost (USD) | Time (s) | Correct |')
+console.log('| :- | :- | -: | -: | :-: | -: | -: | -: | -: | :-: |')
+for (const r of rows) {
+  console.log(`| ${r.task} | ${r.way} | ${r.turns ?? '?'} | ${r.calls ?? '?'} | ${r.usedLever} | ${n(r.input)} | ${n(r.output)} | ${r.cost?.toFixed(4) ?? '?'} | ${r.seconds?.toFixed(1) ?? '?'} | ${r.correct} |`)
 }
-console.log(`\nSum over the tasks, built-in → lever: ${['input', 'output', 'turns'].map(change).join(' · ')} · cost ${total('built-in tools', 'cost').toFixed(4)} → ${total('lever run', 'cost').toFixed(4)} · time ${total('built-in tools', 'seconds').toFixed(1)} s → ${total('lever run', 'seconds').toFixed(1)} s`)
+const total = (way, key) => rows.filter(r => r.way === way).reduce((sum, r) => sum + (r[key] ?? 0), 0)
+const base = WAYS[0].name
+for (const way of WAYS.slice(1)) {
+  const change = key => {
+    const before = total(base, key)
+    const after = total(way.name, key)
+    return `${key} ${n(before)} → ${n(after)} (${before ? `${after >= before ? '+' : ''}${((after / before - 1) * 100).toFixed(0)}%` : '?'})`
+  }
+  console.log(`\nSum over the tasks, ${base} → ${way.name}: ${['input', 'output', 'turns', 'calls'].map(change).join(' · ')} · cost ${total(base, 'cost').toFixed(4)} → ${total(way.name, 'cost').toFixed(4)} · time ${total(base, 'seconds').toFixed(1)} s → ${total(way.name, 'seconds').toFixed(1)} s`)
+}
