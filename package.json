@@ -1,5 +1,5 @@
 {
-  "name": "lever-mcp",
+  "name": "lever-code",
   "version": "0.1.0",
   "description": "Code Mode for any MCP client: the model writes one piece of JavaScript that runs many shell, file, search and MCP steps, and only the result comes back.",
   "type": "module",
@@ -9,6 +9,7 @@
   "files": [
     "bin",
     "src",
+    "examples",
     "README.md",
     "README.ko.md",
     "LICENSE"
@@ -28,5 +29,9 @@
     "agents",
     "tool-calling"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Junhan2/lever.git"
+  },
   "license": "MIT"
 }
