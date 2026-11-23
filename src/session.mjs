@@ -17,9 +17,9 @@ const LOG_CAP = 1024 * 1024
 const KEEP_HISTORY = 20
 const KEEP_JOBS = 50
 const KEEP_NAMES = 2000
-// names a run declares: `const a`, `function b`, and the names inside `const { c, d: e } =` or `const [f] =`
 // import('./file.mjs') and `import x from './file.mjs'`: project files, not packages
 const FILE_IMPORTS = /\bimport\s*\(\s*(['"`])(\.{0,2}\/[^'"`]+)\1\s*\)|^\s*import\s[^'"\n]*?(['"])(\.{0,2}\/[^'"]+)\3/gm
+// names a run declares: `const a`, `function b`, and the names inside `const { c, d: e } =` or `const [f] =`
 const DECLARED = /\b(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)|\b(?:const|let|var)\s*[{[]([^;]{0,400}?)[}\]]\s*=/g
 
 class RunStopped extends Error {
@@ -212,7 +212,7 @@ export function createSession(config, events = {}) {
       }
       const first = imported.get(file)
       if (first === undefined) imported.set(file, changed)
-      else if (changed > first) run.note([`${path.relative(config.projectDir, file)} changed after this session first imported it. import() keeps the first copy, so this run got the old code. To run the new code, start a process: $\`node …\``])
+      else if (changed > first) run.note([`${path.relative(config.projectDir, file)} changed after this session first imported it, and import() keeps the copy it loaded first. To run the new code, start a process: $\`node …\``])
     }
   }
 
@@ -282,8 +282,8 @@ export function createSession(config, events = {}) {
     if (changed.length) lines.push(`changed: ${changed.slice(0, 10).join(', ')}${changed.length > 10 ? ` (+${changed.length - 10} more)` : ''} · undo() puts them back`)
     for (const note of run.notes) lines.push(`note: ${note}`)
     if (run.loose.size) {
-      const calls = [...run.loose].slice(0, 3).join(', ')
-      lines.push(`note: ${calls} ${run.loose.size === 1 ? 'was' : 'were'} called without await, so the result was never read (a promise is always truthy). Write: await exists(path)`)
+      const calls = [...new Set([...run.loose].map(call => call.label))]
+      lines.push(`note: ${calls.slice(0, 3).join(', ')} ${calls.length === 1 ? 'was' : 'were'} called without await, so the result was never read (a promise is always truthy). Write: await exists(path)`)
     }
     for (const text of strays.splice(0)) lines.push(`note: thrown outside the awaited code (by a timer, an event, or a promise without await): ${text}`)
     return lines.join('\n')
@@ -320,6 +320,7 @@ export function createSession(config, events = {}) {
       noteStaleImports(run, code)
       const job = evaluate(code, { timeoutMs })
       filename = job.filename
+      if (job.repaired) run.note(['the code had backticks escaped outside a string ($\\`…\\`), which is not JavaScript; it ran with those backslashes removed'])
       value = await Promise.race([job.promise.then(result => settle(result)), stopped])
     } catch (thrown) {
       error = thrown ?? new Error('the code threw undefined')

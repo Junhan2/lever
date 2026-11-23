@@ -221,7 +221,6 @@ export function createFiles(env) {
 
   /** The part of edit that reads, changes and writes the file; it runs while nothing else changes that file. */
   async function change(run, file, { edits, transform, all }) {
-    const options = { all }
     let tool = edits.length === 1 ? 'Edit' : 'MultiEdit'
     let hookInput = edits.length === 1 ? { file_path: file, ...edits[0] } : { file_path: file, edits }
     // A function edit hands the whole file to the code, so it is checked as a read now and as a write of the new text
@@ -252,16 +251,12 @@ export function createFiles(env) {
           if (!loose) throw new EditError(`edit(${shown(file)}): text not found (${missHint(text, oldText)})`)
           text = text.slice(0, loose.index) + loose.newText + text.slice(loose.index + loose.length)
           run.note([`edit(${shown(file)}): the text was found with ${loose.what}, and replaced there with the new text moved the same way`])
-          replaced += 1
-          continue
-        }
-        if (count > 1 && !options.all) {
+        } else if (count > 1 && !all) {
           const lines = []
           for (let at = text.indexOf(oldText); at !== -1 && lines.length < 5; at = text.indexOf(oldText, at + oldText.length)) lines.push(lineAt(text, at))
           throw new EditError(`edit(${shown(file)}): text found ${count} times (lines ${lines.join(', ')}); add context or pass { all: true }`)
-        }
-        text = options.all ? text.split(oldText).join(newText) : text.replace(oldText, () => newText)
-        const times = options.all ? count : 1
+        } else text = all ? text.split(oldText).join(newText) : text.replace(oldText, () => newText)
+        const times = all && count > 0 ? count : 1
         replaced += times
         const oldLines = oldText.split('\n').length
         const newLines = newText.split('\n').length
@@ -285,7 +280,7 @@ export function createFiles(env) {
   function exists(input) {
     const run = env.run()
     const file = absolute(input, 'exists')
-    const call = `exists('${shown(file)}')`
+    const call = { label: `exists('${shown(file)}')` }
     run.loose.add(call)
     const found = check(run, 'Read', { file_path: file }, shown(file)).then(() =>
       fs.access(file).then(

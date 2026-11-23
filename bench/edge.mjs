@@ -119,6 +119,15 @@ const CASES = [
     const r = await c.call('const out = []\nfor (const n of [1, 2, 3]) {\n  out.push(n * 2)\n}\n({ count: out.length, out })')
     return r.body === 'count: 3\nout: [2,4,6]' || r.text.slice(0, 200)
   }],
+  ['a result that is a template with ${} at the very end is returned', async c => {
+    const r = await c.call('const n = 3;\n`total: ${n} of ${n + 1}`')
+    const shell = await c.call('const word = "hi"\n$`echo ${word}`')
+    return (r.body === 'total: 3 of 4' && shell.body.startsWith('hi')) || `${r.text.slice(0, 100)} / ${shell.text.slice(0, 100)}`
+  }],
+  ['backticks that arrive escaped outside a string still run, with a note', async c => {
+    const r = await c.call('const text = `a\nb`\nconst out = await $\\`echo \\${text.length}\\`.text()\nout')
+    return (!r.isError && r.body === '3' && /backticks escaped outside a string/.test(r.text)) || r.text.slice(0, 300)
+  }],
   ['the chain Bun and zx have works: cwd, env, quiet', async (c, t) => {
     mkdirSync(path.join(t.dir, 'chain'), { recursive: true })
     const r = await c.call("({ where: (await $`pwd`.cwd('chain').nothrow().text()).endsWith('/chain'), here: (await $`pwd`.cwd(process.cwd()).quiet().text()) === process.cwd(), x: await $`printf %s \"$LEVER_Y\"`.env({ LEVER_Y: 'y' }).text() })")

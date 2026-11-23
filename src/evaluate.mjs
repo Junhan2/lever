@@ -136,6 +136,8 @@ export function lastStatement(code) {
         else if (code[i] === '$' && code[i + 1] === '{') break
         else i++
       }
+      // the rest of a template after a `${ }` is no token of its own, but the statement reaches to its end
+      if (resuming && depth === 0) lastEnd = i + (code[i] === '$' ? 2 : 1)
       if (code[i] === '$') {
         i += 2
         templates.push(depth)
@@ -256,6 +258,65 @@ export function hoistImports(code) {
   return changed ? lines.join('\n') : null
 }
 
+/** Code that was written inside a template literal sometimes arrives with its own backticks still escaped
+ * (`$\`npm test\``), which never compiles. Returns the code with those backslashes removed (and `\${` inside such a
+ * template turned back into `${`), or null when no escaped backtick stands outside a string, template or comment. */
+export function unescapeBackticks(code) {
+  const n = code.length
+  const open = [] // one entry per open template literal: null in its text, else the brace depth where its ${ began
+  let depth = 0
+  let out = ''
+  let changed = false
+  let i = 0
+  const copyTo = end => {
+    out += code.slice(i, end)
+    i = end
+  }
+  while (i < n) {
+    const c = code[i]
+    if (open.length && open.at(-1) === null) {
+      // the text of a template literal
+      if (c === '\\') copyTo(Math.min(n, i + 2))
+      else if (c === '`') {
+        open.pop()
+        copyTo(i + 1)
+      } else if (c === '$' && code[i + 1] === '{') {
+        open[open.length - 1] = depth++
+        copyTo(i + 2)
+      } else copyTo(i + 1)
+      continue
+    }
+    if (c === '/' && code[i + 1] === '/') {
+      const end = code.indexOf('\n', i)
+      copyTo(end === -1 ? n : end)
+    } else if (c === '/' && code[i + 1] === '*') {
+      const end = code.indexOf('*/', i + 2)
+      copyTo(end === -1 ? n : end + 2)
+    } else if (c === '"' || c === "'") {
+      let end = i + 1
+      while (end < n && code[end] !== c && code[end] !== '\n') end += code[end] === '\\' ? 2 : 1
+      copyTo(Math.min(n, end + 1))
+    } else if (c === '`') {
+      open.push(null)
+      copyTo(i + 1)
+    } else if (c === '\\' && code[i + 1] === '`') {
+      const end = code.indexOf('\\`', i + 2)
+      if (end === -1) return null
+      out += `\`${code.slice(i + 2, end).replace(/\\\$\{/g, '${')}\``
+      i = end + 2
+      changed = true
+    } else {
+      if (c === '{') depth++
+      else if (c === '}') {
+        depth--
+        if (open.length && open.at(-1) === depth) open[open.length - 1] = null
+      }
+      copyTo(i + 1)
+    }
+  }
+  return changed ? out : null
+}
+
 /** A fresh vm context holding the helpers and the Node globals code usually reaches for. With `dir`, the code's file
  * name sits in that folder, so `import('pkg')` finds the packages installed there. */
 export function createEvaluator(globals = {}, { dir } = {}) {
@@ -278,14 +339,29 @@ export function createEvaluator(globals = {}, { dir } = {}) {
     const name = `run-${++count}.js`
     const filename = dir ? path.join(dir, name) : name
     const options = { filename, lineOffset: -1, ...(importModuleDynamically ? { importModuleDynamically } : {}) }
+    const compile = text => new vm.Script(wrapCode(hoistImports(text) ?? text).source, options)
     let promise
+    let repaired = false
     try {
-      const script = new vm.Script(wrapCode(hoistImports(code) ?? code).source, options)
+      let script
+      try {
+        script = compile(code)
+      } catch (error) {
+        // the one repair: backticks that arrive escaped outside a string, when removing the backslashes makes it compile
+        const fixed = error?.name === 'SyntaxError' ? unescapeBackticks(code) : null
+        if (fixed === null) throw error
+        try {
+          script = compile(fixed)
+          repaired = true
+        } catch {
+          throw error
+        }
+      }
       promise = script.runInContext(context, { timeout: timeoutMs, breakOnSigint: false })
     } catch (error) {
       promise = Promise.reject(error)
     }
-    return { filename, promise }
+    return { filename, promise, repaired }
   }
 
   return { evaluate, context }

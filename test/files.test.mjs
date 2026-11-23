@@ -27,7 +27,7 @@ test('read, ranges, write and JSON', async () => {
   // exists without await is a promise, which is always truthy: the run keeps the call so the reply can say so
   assert.equal(env.current.loose.size, 0)
   assert.equal(files.exists('nothing-here.txt') ? 'always' : 'never', 'always')
-  assert.deepEqual([...env.current.loose], ["exists('nothing-here.txt')"])
+  assert.deepEqual([...env.current.loose].map(call => call.label), ["exists('nothing-here.txt')"])
 })
 
 test('edit: one pair, pairs, all, function, and helpful misses', async () => {
