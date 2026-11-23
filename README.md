@@ -81,7 +81,7 @@ What the numbers show:
 - lever is not better everywhere. For the 660-line module, both models needed one more model call with lever than without. A reply holds 8,000 characters, so a whole large file does not come back at once.
 - "lever only" also removes the six built-in tool definitions, which is about 3,300 tokens less on each model call. To run Claude Code this way, start it with `claude --disallowedTools Bash Read Edit Write Glob Grep`.
 - In a normal install the model picks the tool. Haiku picked lever in 29 of 33 runs and Opus in 33 of 33. The wording of lever's instructions decides this: before they named loops and steps that follow from each other, Haiku read the fifteen chain files one by one in 5 of 9 runs.
-- Three runs for each row is a small sample, and a row often moves by one model call from run to run. Run the script with your own model and project before you rely on these numbers.
+- Three runs for each row is a small sample, and a row often moves by one model call from run to run. Drawn again at random from the same runs, the saving of a normal install with Haiku lies between 29% and 38% of the model calls. Run the script with your own model and project before you rely on these numbers.
 
 [bench/results/2026-11-24.md](bench/results/2026-11-24.md) has the full tables, the results before this round of fixes, what the model's own code showed, and the test of three reply limits.
 
