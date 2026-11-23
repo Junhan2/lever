@@ -45,7 +45,8 @@ function runOne({ task, way, repeat, model, leverBin, leverEnv, userSettings }) 
   const dir = mkdtempSync(path.join(os.tmpdir(), 'lever-stress-'))
   makeProject(dir, task.fixture)
   // The prompt comes first: --allowedTools and --disallowedTools take several values and would swallow it.
-  const flags = ['-p', task.prompt, '--model', model, '--output-format', 'stream-json', '--verbose', '--strict-mcp-config', '--max-turns', '40']
+  // Sessions are not saved: each run would otherwise leave a project folder in the user's Claude Code history.
+  const flags = ['-p', task.prompt, '--model', model, '--output-format', 'stream-json', '--verbose', '--strict-mcp-config', '--no-session-persistence', '--max-turns', '40']
   if (!userSettings) flags.push('--setting-sources', 'project,local')
   let configDir = null
   if (WAYS[way].lever) {

@@ -1,8 +1,9 @@
 // The same requests sent to real Claude Code three ways: with only the built-in tools, with the built-in tools and
-// lever (the way people install it), and with only lever's run. Tokens, cost, time and turns come from Claude Code's own
-// result, the tool calls from its event stream, and each answer is checked. It calls the model, so it is not part of
-// npm test: node bench/live.mjs [model] [repeats] (default haiku, 3). Every request works on its own copy of this
-// repository, and each row shows the median of the repeats.
+// lever (the way people install it), and with only lever's run. Tokens, cost and time come from Claude Code's own
+// result, the model calls and tool calls from its event stream, and each answer is checked. A model call is one round
+// trip to the model. Claude Code's num_turns is the number of tool calls plus one, so it is not used. This script calls
+// the model, so it is not part of npm test: node bench/live.mjs [model] [repeats] (default haiku, 3). Every request
+// works on its own copy of this repository, and each row shows the median of the repeats.
 import { spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
@@ -77,7 +78,8 @@ const TASKS = [
 
 function ask(dir, prompt, way) {
   // The prompt comes first: --allowedTools and --disallowedTools take several values and would swallow it.
-  const args = ['-p', prompt, '--model', MODEL, '--output-format', 'stream-json', '--verbose', '--strict-mcp-config']
+  // Sessions are not saved: each run would otherwise leave a project folder in the user's Claude Code history.
+  const args = ['-p', prompt, '--model', MODEL, '--output-format', 'stream-json', '--verbose', '--strict-mcp-config', '--no-session-persistence']
   if (way.lever) {
     // The config lives outside the copy, so the copy holds only the project files the checks compare.
     const config = path.join(mkdtempSync(path.join(os.tmpdir(), 'lever-live-config-')), 'mcp.json')
@@ -96,9 +98,10 @@ function ask(dir, prompt, way) {
     }
   })
   const calls = events.filter(e => e.type === 'assistant').flatMap(e => (e.message?.content ?? []).filter(c => c.type === 'tool_use').map(c => c.name))
+  const rounds = new Set(events.filter(e => e.type === 'assistant' && e.message?.id).map(e => e.message.id)).size
   const result = events.findLast(e => e.type === 'result')
-  if (!result) return { error: (out.stderr || out.stdout).slice(0, 400), calls, wall: Date.now() - started }
-  return { ...result, calls, wall: Date.now() - started }
+  if (!result) return { error: (out.stderr || out.stdout).slice(0, 400), calls, rounds, wall: Date.now() - started }
+  return { ...result, calls, rounds, wall: Date.now() - started }
 }
 
 const median = values => {
@@ -119,7 +122,7 @@ for (const task of TASKS) {
       const usage = result.usage ?? {}
       const answer = String(result.result ?? '')
       runs.push({
-        turns: result.num_turns,
+        rounds: result.rounds,
         calls: result.calls.length,
         usedLever: result.calls.includes(LEVER),
         input: (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0),
@@ -135,7 +138,7 @@ for (const task of TASKS) {
     rows.push({
       task: task.name,
       way: way.name,
-      turns: pick('turns'),
+      rounds: pick('rounds'),
       calls: pick('calls'),
       usedLever: way.lever ? `${runs.filter(r => r.usedLever).length}/${runs.length}` : '-',
       input: pick('input'),
@@ -149,18 +152,19 @@ for (const task of TASKS) {
 
 const n = value => (value === undefined ? '?' : Math.round(value).toLocaleString('en-US'))
 console.log(`Claude Code ${spawnSync('claude', ['--version'], { encoding: 'utf8' }).stdout.trim()}, model ${MODEL}, median of ${REPEATS} runs per row. Input tokens include cached ones.\n`)
-console.log('| Task | Way | Turns | Tool calls | Used lever | Input tokens | Output tokens | Cost (USD) | Time (s) | Correct |')
+console.log('| Task | Way | Model calls | Tool calls | Used lever | Input tokens | Output tokens | Cost (USD) | Time (s) | Correct |')
 console.log('| :- | :- | -: | -: | :-: | -: | -: | -: | -: | :-: |')
 for (const r of rows) {
-  console.log(`| ${r.task} | ${r.way} | ${r.turns ?? '?'} | ${r.calls ?? '?'} | ${r.usedLever} | ${n(r.input)} | ${n(r.output)} | ${r.cost?.toFixed(4) ?? '?'} | ${r.seconds?.toFixed(1) ?? '?'} | ${r.correct} |`)
+  console.log(`| ${r.task} | ${r.way} | ${r.rounds ?? '?'} | ${r.calls ?? '?'} | ${r.usedLever} | ${n(r.input)} | ${n(r.output)} | ${r.cost?.toFixed(4) ?? '?'} | ${r.seconds?.toFixed(1) ?? '?'} | ${r.correct} |`)
 }
 const total = (way, key) => rows.filter(r => r.way === way).reduce((sum, r) => sum + (r[key] ?? 0), 0)
 const base = WAYS[0].name
+const LABELS = { input: 'input', output: 'output', rounds: 'model calls', calls: 'tool calls' }
 for (const way of WAYS.slice(1)) {
   const change = key => {
     const before = total(base, key)
     const after = total(way.name, key)
-    return `${key} ${n(before)} → ${n(after)} (${before ? `${after >= before ? '+' : ''}${((after / before - 1) * 100).toFixed(0)}%` : '?'})`
+    return `${LABELS[key]} ${n(before)} → ${n(after)} (${before ? `${after >= before ? '+' : ''}${((after / before - 1) * 100).toFixed(0)}%` : '?'})`
   }
-  console.log(`\nSum over the tasks, ${base} → ${way.name}: ${['input', 'output', 'turns', 'calls'].map(change).join(' · ')} · cost ${total(base, 'cost').toFixed(4)} → ${total(way.name, 'cost').toFixed(4)} · time ${total(base, 'seconds').toFixed(1)} s → ${total(way.name, 'seconds').toFixed(1)} s`)
+  console.log(`\nSum over the tasks, ${base} → ${way.name}: ${['input', 'output', 'rounds', 'calls'].map(change).join(' · ')} · cost ${total(base, 'cost').toFixed(4)} → ${total(way.name, 'cost').toFixed(4)} · time ${total(base, 'seconds').toFixed(1)} s → ${total(way.name, 'seconds').toFixed(1)} s`)
 }
