@@ -3,8 +3,9 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { makeProject, TIMEOUTS } from './project.mjs'
-import { deadExports, dependentsOf, jsonFrom, TASKS, topErrors } from './tasks.mjs'
+import { spawnSync } from 'node:child_process'
+import { CHAIN, HISTORY, historySubject, makeProject, TIMEOUTS } from './project.mjs'
+import { deadExports, dependentsOf, jsonFrom, runTests, TASKS, TESTS, topErrors } from './tasks.mjs'
 
 let failed = 0
 const check = (label, ok, detail = '') => {
@@ -20,6 +21,7 @@ const edit = (dir, file, change) => writeFileSync(path.join(dir, file), change(r
 const task = key => TASKS.find(t => t.key === key)
 
 const clean = fresh()
+check(`the untouched project has ${TESTS} passing tests`, runTests(clean).tests === TESTS && runTests(clean).fail === 0)
 const dead = deadExports(clean)
 check('seven planted dead exports', dead.length === 7, dead.join(' '))
 const dependents = dependentsOf(clean, 'src/core/clock.mjs')
@@ -71,6 +73,48 @@ check('apply-config: untouched', task('apply-config').check(config) !== true, St
 for (const [name, value] of Object.entries(TIMEOUTS)) edit(config, `src/services/${name}.mjs`, text => text.replace('export const timeoutMs = 3000', `export const timeoutMs = ${value}`))
 check('apply-config: applied', task('apply-config').check(config) === true)
 
-for (const dir of [clean, bugs, move, feature, config]) rmSync(dir, { recursive: true, force: true })
+const big = fresh({ ruleBugs: true })
+check('big-file-fix: untouched', task('big-file-fix').check(big) !== true, String(task('big-file-fix').check(big)))
+writeFileSync(path.join(big, 'src/engine/rules.mjs'), readFileSync(path.join(clean, 'src/engine/rules.mjs')))
+check('big-file-fix: fixed', task('big-file-fix').check(big) === true)
+
+const api = fresh()
+check('api-change: untouched', task('api-change').check(api) !== true, String(task('api-change').check(api)))
+edit(api, 'src/core/money.mjs', text => text.replace("export function formatMoney(amount, currency = 'USD') {", "export function formatMoney({ amount, currency = 'USD' }) {"))
+edit(api, 'test/core.test.mjs', text => text.replace('formatMoney(3)', 'formatMoney({ amount: 3 })').replace("formatMoney(3.5, 'EUR')", "formatMoney({ amount: 3.5, currency: 'EUR' })"))
+check('api-change: callers not updated yet', /still called the old way/.test(String(task('api-change').check(api))), String(task('api-change').check(api)))
+for (const file of makeProject(fresh()).filter(f => f.startsWith('src/services/'))) edit(api, file, text => text.replace('formatMoney(record.total)', 'formatMoney({ amount: record.total })'))
+check('api-change: changed everywhere', task('api-change').check(api) === true, String(task('api-change').check(api)))
+
+const repo = fresh({ history: true })
+const git = (...args) => spawnSync('git', args, { cwd: repo, encoding: 'utf8' })
+check('bisect: right answer', task('bisect').check(repo, historySubject(HISTORY.breaking)) === true, String(task('bisect').check(repo, historySubject(HISTORY.breaking))))
+check('bisect: wrong answer', task('bisect').check(repo, historySubject(HISTORY.breaking - 1)) !== true)
+check('bisect: no answer', task('bisect').check(repo, 'I could not tell') !== true)
+check('the breaking commit is where the test starts to fail', (() => {
+  const at = number => {
+    git('checkout', '-q', `HEAD~${HISTORY.commits - number}`)
+    const ok = runTests(repo).fail === 0
+    git('checkout', '-q', 'main')
+    return ok
+  }
+  return at(HISTORY.breaking - 1) === true && at(HISTORY.breaking) === false && at(1) === true
+})())
+git('checkout', '-q', 'HEAD~3')
+check('bisect: right answer but left off main', task('bisect').check(repo, historySubject(HISTORY.breaking)) !== true, String(task('bisect').check(repo, historySubject(HISTORY.breaking))))
+
+check('follow-chain: right answer', task('follow-chain').check(clean, `{"value": "${CHAIN.value}", "files": ${CHAIN.files}}`) === true)
+check('follow-chain: wrong count', task('follow-chain').check(clean, `{"value": "${CHAIN.value}", "files": ${CHAIN.files - 1}}`) !== true)
+check('follow-chain: a decoy value', task('follow-chain').check(clean, `{"value": "decoy-1", "files": ${CHAIN.files}}`) !== true)
+check('the chain really has that many files', (() => {
+  let file = 'config/chain/start.json'
+  for (let count = 1; ; count++) {
+    const data = JSON.parse(readFileSync(path.join(clean, file), 'utf8'))
+    if (data.value !== undefined) return count === CHAIN.files && data.value === CHAIN.value
+    file = data.next
+  }
+})())
+
+for (const dir of [clean, bugs, move, feature, config, big, api, repo]) rmSync(dir, { recursive: true, force: true })
 console.log(failed ? `${failed} checks failed` : 'all checks passed')
 process.exit(failed ? 1 : 0)

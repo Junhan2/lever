@@ -1,7 +1,11 @@
-// Writes a small but realistic project for the stress benchmark: about 45 source and test files with an import graph a
-// few levels deep, a test suite that runs in under two seconds, a config file and a 4 MB log. Everything is generated
-// from the tables below, so every copy is the same and the checkers in tasks.mjs can work out the right answers from
-// the files themselves. `bugs: true` plants three bugs that make exactly three tests fail.
+// Writes a small but realistic project for the stress benchmark: about 80 files with an import graph a few levels deep,
+// one 800-line module, a test suite that runs in under two seconds, config files and a 4 MB log. Everything is
+// generated from the tables below, so every copy is the same and the checkers in tasks.mjs can work out the right
+// answers from the files themselves. Options plant the problems the tasks ask about:
+//   bugs: three bugs in small modules, so exactly three tests fail
+//   ruleBugs: two bugs far apart in the 800-line module, so exactly two tests fail
+//   history: a git repository of 24 commits, one of which breaks a test that still fails at the last commit
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
@@ -171,7 +175,165 @@ function logText() {
   return `${lines.join('\n')}\n`
 }
 
-export function makeProject(dir, { bugs = false } = {}) {
+// ---- the 800-line module: sixty small rules in four families, each with its own numbers
+
+const RULE_NOUNS = ['Quantity', 'Discount', 'Shipping', 'Weight', 'Rating', 'Stock', 'Margin', 'Refund', 'Credit', 'Points', 'Latency', 'Retries', 'Batch', 'Quota', 'Budget']
+
+/** One entry per rule: its name, source text and the body of its test. */
+function rules({ ruleBugs }) {
+  const out = []
+  RULE_NOUNS.forEach((noun, n) => {
+    const lower = noun.toLowerCase()
+    const min = n * 5
+    const max = min + 50 + n * 10
+    out.push({
+      name: `clamp${noun}`,
+      source: `/**
+ * Keeps a ${lower} value inside the allowed range.
+ * Values below ${min} become ${min}, and values above ${max} become ${max}.
+ * Anything that is not a finite number counts as the lowest value.
+ */
+export function clamp${noun}(value) {
+  if (!Number.isFinite(value)) return ${min}
+  if (value < ${min}) return ${min}
+  if (value > ${max}) return ${max}
+  return value
+}`,
+      test: [`assert.equal(clamp${noun}(${min - 1}), ${min})`, `assert.equal(clamp${noun}(${max + 1}), ${max})`, `assert.equal(clamp${noun}(${min + 3}), ${min + 3})`, `assert.equal(clamp${noun}(NaN), ${min})`],
+    })
+    const t1 = 100 + n * 20
+    const [t2, t3] = [t1 * 2, t1 * 5]
+    const [r1, r2, r3] = [5 + n, 10 + n, 15 + n]
+    const tierBug = ruleBugs && noun === 'Shipping'
+    out.push({
+      name: `tier${noun}`,
+      source: `/**
+ * The ${lower} tier for an amount, as a whole number of percent.
+ * From ${t1} it is ${r1}, from ${t2} it is ${r2}, and from ${t3} it is ${r3}.
+ * Below ${t1} there is no tier.
+ */
+export function tier${noun}(amount) {
+  if (amount >= ${t3}) return ${r3}
+  if (amount ${tierBug ? '>' : '>='} ${t2}) return ${r2}
+  if (amount >= ${t1}) return ${r1}
+  return 0
+}`,
+      test: [`assert.equal(tier${noun}(${t1 - 1}), 0)`, `assert.equal(tier${noun}(${t1}), ${r1})`, `assert.equal(tier${noun}(${t2}), ${r2})`, `assert.equal(tier${noun}(${t3}), ${r3})`],
+    })
+    const prefix = noun.slice(0, 3).toUpperCase()
+    const width = 3 + (n % 4)
+    out.push({
+      name: `label${noun}`,
+      source: `/**
+ * A fixed-width label for a ${lower} value, for reports and logs.
+ * The whole part is padded with zeros to ${width} digits; a minus sign goes in front of it.
+ */
+export function label${noun}(value, unit = 'u') {
+  const sign = value < 0 ? '-' : ''
+  const whole = Math.abs(Math.trunc(value))
+  return \`${prefix}:\${sign}\${String(whole).padStart(${width}, '0')}\${unit}\`
+}`,
+      test: [`assert.equal(label${noun}(7), '${prefix}:${'7'.padStart(width, '0')}u')`, `assert.equal(label${noun}(-12.9, 'kg'), '${prefix}:-${'12'.padStart(width, '0')}kg')`],
+    })
+    const divisor = 2 + n
+    const scoreBug = ruleBugs && noun === 'Margin'
+    out.push({
+      name: `score${noun}`,
+      source: `/**
+ * The ${lower} score of a list of items: each value times its weight, summed and divided by ${divisor}.
+ * An item without a weight counts once. The result is rounded to two decimals.
+ */
+export function score${noun}(items) {
+  let total = 0
+  for (const item of items) total += (item.value ?? 0) * (item.weight ?? ${scoreBug ? 0 : 1})
+  return Math.round((total / ${divisor}) * 100) / 100
+}`,
+      test: [`assert.equal(score${noun}([{ value: 10, weight: 2 }, { value: 4 }]), ${Math.round((24 / divisor) * 100) / 100})`, `assert.equal(score${noun}([]), 0)`],
+    })
+  })
+  return out
+}
+
+function rulesSource(options) {
+  return `// Business rules: sixty small pure functions. Each one stands alone, so they can be read and tested one at a time.\n\n${rules(options).map(rule => rule.source).join('\n\n')}\n`
+}
+
+function rulesTest() {
+  const list = rules({ ruleBugs: false })
+  const names = list.map(rule => rule.name)
+  const imports = []
+  for (let i = 0; i < names.length; i += 6) imports.push(`  ${names.slice(i, i + 6).join(', ')},`)
+  const tests = list.map(rule => `test('${rule.name}', () => {\n${rule.test.map(line => `  ${line}`).join('\n')}\n})`)
+  return `import assert from 'node:assert/strict'\nimport { test } from 'node:test'\nimport {\n${imports.join('\n')}\n} from '../src/engine/rules.mjs'\n\n${tests.join('\n\n')}\n`
+}
+
+// ---- the tax table and its history
+
+const TAX_REGIONS = { KR: 0.1, JP: 0.1, US: 0.07, DE: 0.19, FR: 0.2, GB: 0.2, CA: 0.05, AU: 0.1 }
+export const HISTORY = { commits: 24, breaking: 15 }
+export const historySubject = number => `change ${String(number).padStart(2, '0')}: update tax table`
+
+/** The tax table as it is after `revision` changes. Each change moves one untested rate a little; the breaking one
+ * also moves KR, which the test checks. Without a history the table is the first revision. */
+function taxTable(revision) {
+  const rates = { ...TAX_REGIONS }
+  const moving = ['JP', 'US', 'FR', 'GB', 'CA', 'AU']
+  for (let change = 2; change <= revision; change++) {
+    const region = moving[change % moving.length]
+    rates[region] = Math.round((rates[region] + 0.001) * 1000) / 1000
+    if (change === HISTORY.breaking) rates.KR = 0.11
+  }
+  return `// Tax rates by region, as a share of the amount. Revision ${revision}.
+export const TAX_RATES = {
+${Object.entries(rates).map(([region, rate]) => `  ${region}: ${rate},`).join('\n')}
+}
+
+export function taxFor(region, amount) {
+  const rate = TAX_RATES[region]
+  if (rate === undefined) throw new Error(\`no tax rate for \${region}\`)
+  return Math.round(amount * rate * 100) / 100
+}
+`
+}
+
+// ---- a chain of config files: each names the next one, the last one holds a value
+
+export const CHAIN = { files: 15, value: 'harbor-42' }
+
+function chainFiles() {
+  const next = random(4217)
+  const name = () => `config/chain/${Math.floor(next() * 36 ** 6).toString(36).padStart(6, '0')}.json`
+  const files = {}
+  const path = ['config/chain/start.json', ...Array.from({ length: CHAIN.files - 1 }, name)]
+  path.forEach((file, index) => {
+    files[file] = `${JSON.stringify(index === path.length - 1 ? { value: CHAIN.value } : { next: path[index + 1] }, null, 2)}\n`
+  })
+  // files nothing points to: they hold other values, so searching for "value" does not find the answer
+  for (let i = 0; i < 8; i++) files[name()] = `${JSON.stringify(i % 2 ? { value: `decoy-${i}` } : { next: name() }, null, 2)}\n`
+  return files
+}
+
+function git(dir, args, date) {
+  const stamp = date ? { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } : {}
+  const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8', env: { ...process.env, ...stamp } })
+  if (result.status !== 0) throw new Error(`git ${args.join(' ')}: ${result.stderr}`)
+  return result.stdout.trim()
+}
+
+/** Turns the project into a git repository whose history changes the tax table once per commit. */
+function writeHistory(dir) {
+  git(dir, ['-c', 'init.defaultBranch=main', 'init', '-q'])
+  // nothing from the machine's own git setup runs here or signs these commits
+  mkdirSync(path.join(dir, '.git', 'no-hooks'), { recursive: true })
+  for (const [key, value] of [['core.hooksPath', '.git/no-hooks'], ['commit.gpgsign', 'false'], ['user.name', 'bench'], ['user.email', 'bench@example.com']]) git(dir, ['config', key, value])
+  for (let revision = 1; revision <= HISTORY.commits; revision++) {
+    writeFileSync(path.join(dir, 'src/core/tax-table.mjs'), taxTable(revision))
+    git(dir, ['add', '-A'])
+    git(dir, ['commit', '-q', '-m', historySubject(revision)], `2026-11-01T00:${String(revision).padStart(2, '0')}:00Z`)
+  }
+}
+
+export function makeProject(dir, { bugs = false, ruleBugs = false, history = false } = {}) {
   const files = {}
   files['package.json'] = `${JSON.stringify({ name: 'shop-core', version: '1.4.0', type: 'module', private: true, scripts: { test: 'node --test "test/*.test.mjs"' } }, null, 2)}\n`
   files['README.md'] = '# shop-core\n\nIn-memory services for a small shop: orders, invoices, customers and the rest.\n\nRun the tests with `npm test`.\n'
@@ -421,11 +583,27 @@ test('days are added and counted', () => {
 })
 `
   files['test/routes.test.mjs'] = routeTest()
+  files['src/engine/rules.mjs'] = rulesSource({ ruleBugs })
+  files['test/rules.test.mjs'] = rulesTest()
+  files['src/core/tax-table.mjs'] = taxTable(1)
+  files['test/tax.test.mjs'] = `import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { TAX_RATES, taxFor } from '../src/core/tax-table.mjs'
+
+test('tax for the main regions', () => {
+  assert.equal(taxFor('KR', 100), 10)
+  assert.equal(taxFor('DE', 100), 19)
+  assert.ok(Object.keys(TAX_RATES).length >= 8)
+  assert.throws(() => taxFor('XX', 1))
+})
+`
+  Object.assign(files, chainFiles())
 
   for (const [file, text] of Object.entries(files)) {
     const full = path.join(dir, file)
     mkdirSync(path.dirname(full), { recursive: true })
     writeFileSync(full, text)
   }
+  if (history) writeHistory(dir)
   return Object.keys(files).sort()
 }

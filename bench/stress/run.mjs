@@ -1,6 +1,8 @@
 // Runs the stress tasks in real Claude Code three ways (built-in tools only, built-in tools and lever, lever only) and
-// records every run: whether the answer was right, turns, tool calls, tokens, cost, time, and the errors the tools
-// returned. It calls the model, so it uses your Claude Code account.
+// records every run: whether the answer was right, model calls, tool calls, tokens, cost, time, the errors the tools
+// returned and the code sent to lever. It calls the model, so it uses your Claude Code account.
+// "Model calls" are round trips to the model, counted from the event stream. Claude Code's own num_turns is the number
+// of tool calls plus one, which hides that the built-in tools can run several calls in one round trip.
 //   node bench/stress/run.mjs [--model haiku] [--repeats 3] [--ways built-in,both,lever] [--tasks fix-tests,dependents]
 //                             [--concurrency 3] [--out runs.jsonl] [--lever /path/to/bin/lever.mjs] [--user-settings]
 //   node bench/stress/run.mjs --report runs.jsonl       prints the tables for saved runs without running anything
@@ -25,7 +27,7 @@ const WAYS = {
 // What "a real gain on complex work" has to mean, fixed before measuring. Changes are against built-in tools only.
 export const PASS_LINES = [
   { key: 'correct', label: 'Right answers', target: 'not fewer than with built-in tools', pass: (base, way) => way.correct >= base.correct },
-  { key: 'turns', label: 'Turns', target: 'at least 30% fewer', pass: (base, way) => way.turns <= base.turns * 0.7 },
+  { key: 'rounds', label: 'Model calls', target: 'at least 30% fewer', pass: (base, way) => way.rounds <= base.rounds * 0.7 },
   { key: 'input', label: 'Input tokens', target: 'at least 25% fewer', pass: (base, way) => way.input <= base.input * 0.75 },
   { key: 'output', label: 'Output tokens', target: 'not more than 10% above', pass: (base, way) => way.output <= base.output * 1.1 },
   { key: 'cost', label: 'Cost', target: 'at least 15% lower', pass: (base, way) => way.cost <= base.cost * 0.85 },
@@ -66,6 +68,8 @@ function runOne({ task, way, repeat, model, leverBin, userSettings }) {
       const names = new Map()
       const tools = []
       const errors = []
+      const rounds = new Set()
+      const leverCalls = new Map()
       let result = null
       for (const line of out.split('\n')) {
         let event
@@ -74,14 +78,18 @@ function runOne({ task, way, repeat, model, leverBin, userSettings }) {
         } catch {
           continue
         }
+        if (event.type === 'assistant' && event.message?.id) rounds.add(event.message.id)
         const content = Array.isArray(event.message?.content) ? event.message.content : []
         for (const block of content) {
           if (block.type === 'tool_use') {
             names.set(block.id, block.name)
             tools.push(block.name)
-          } else if (block.type === 'tool_result' && block.is_error) {
+            if (block.name === LEVER) leverCalls.set(block.id, { code: String(block.input?.code ?? '').slice(0, 1500) })
+          } else if (block.type === 'tool_result') {
             const text = typeof block.content === 'string' ? block.content : (block.content ?? []).map(part => part.text ?? '').join(' ')
-            errors.push({ tool: names.get(block.tool_use_id) ?? '?', text: text.slice(0, 400) })
+            if (block.is_error) errors.push({ tool: names.get(block.tool_use_id) ?? '?', text: text.slice(0, 400) })
+            const call = leverCalls.get(block.tool_use_id)
+            if (call) Object.assign(call, { error: Boolean(block.is_error), reply: text.slice(0, 500), replyChars: text.length })
           }
         }
         if (event.type === 'result') result = event
@@ -103,7 +111,7 @@ function runOne({ task, way, repeat, model, leverBin, userSettings }) {
         repeat,
         correct: verdict === true,
         why: verdict === true ? null : String(verdict).slice(0, 300),
-        turns: result?.num_turns ?? null,
+        rounds: rounds.size,
         calls: tools.length,
         tools,
         usedLever: tools.includes(LEVER),
@@ -113,6 +121,7 @@ function runOne({ task, way, repeat, model, leverBin, userSettings }) {
         seconds: (result?.duration_ms ?? Date.now() - started) / 1000,
         stop: result?.subtype ?? 'none',
         errors,
+        lever: [...leverCalls.values()],
         answer: answer.slice(0, 300),
       })
     })
@@ -138,25 +147,25 @@ export function report(rows) {
     const cell = (task, way) => {
       const runs = mine.filter(row => row.task === task && row.way === way)
       const pick = key => median(runs.map(run => run[key]))
-      return { runs: runs.length, correct: runs.filter(run => run.correct).length, usedLever: runs.filter(run => run.usedLever).length, turns: pick('turns'), calls: pick('calls'), input: pick('input'), output: pick('output'), cost: pick('cost'), seconds: pick('seconds') }
+      return { runs: runs.length, correct: runs.filter(run => run.correct).length, usedLever: runs.filter(run => run.usedLever).length, rounds: pick('rounds'), calls: pick('calls'), input: pick('input'), output: pick('output'), cost: pick('cost'), seconds: pick('seconds') }
     }
     const repeats = Math.max(...mine.map(row => row.repeat))
     lines.push(`## ${model}: ${tasks.length} tasks, median of ${repeats} run${repeats === 1 ? '' : 's'} per row`, '')
-    lines.push('| Task | Way | Right | Used lever | Turns | Tool calls | Input tokens | Output tokens | Cost (USD) | Time (s) |', '| :- | :- | :-: | :-: | -: | -: | -: | -: | -: | -: |')
-    const totals = Object.fromEntries(ways.map(way => [way, { runs: 0, correct: 0, usedLever: 0, turns: 0, calls: 0, input: 0, output: 0, cost: 0, seconds: 0 }]))
+    lines.push('| Task | Way | Right | Used lever | Model calls | Tool calls | Input tokens | Output tokens | Cost (USD) | Time (s) |', '| :- | :- | :-: | :-: | -: | -: | -: | -: | -: | -: |')
+    const totals = Object.fromEntries(ways.map(way => [way, { runs: 0, correct: 0, usedLever: 0, rounds: 0, calls: 0, input: 0, output: 0, cost: 0, seconds: 0 }]))
     for (const task of tasks) {
       for (const way of ways) {
         const c = cell(task.key, way)
         for (const key of Object.keys(totals[way])) totals[way][key] += c[key]
-        lines.push(`| ${task.name} | ${WAYS[way].label} | ${c.correct}/${c.runs} | ${WAYS[way].lever ? `${c.usedLever}/${c.runs}` : '-'} | ${c.turns} | ${c.calls} | ${n(c.input)} | ${n(c.output)} | ${c.cost.toFixed(4)} | ${c.seconds.toFixed(1)} |`)
+        lines.push(`| ${task.name} | ${WAYS[way].label} | ${c.correct}/${c.runs} | ${WAYS[way].lever ? `${c.usedLever}/${c.runs}` : '-'} | ${c.rounds} | ${c.calls} | ${n(c.input)} | ${n(c.output)} | ${c.cost.toFixed(4)} | ${c.seconds.toFixed(1)} |`)
       }
     }
-    lines.push('', '| Sum over the tasks | Right | Turns | Tool calls | Input tokens | Output tokens | Cost (USD) | Time (s) |', '| :- | :-: | -: | -: | -: | -: | -: | -: |')
+    lines.push('', '| Sum over the tasks | Right | Model calls | Tool calls | Input tokens | Output tokens | Cost (USD) | Time (s) |', '| :- | :-: | -: | -: | -: | -: | -: | -: |')
     const base = totals['built-in']
     for (const way of ways) {
       const t = totals[way]
       const versus = key => (way === 'built-in' || !base ? '' : ` (${change(base[key], t[key])})`)
-      lines.push(`| ${WAYS[way].label} | ${t.correct}/${t.runs} | ${t.turns}${versus('turns')} | ${t.calls}${versus('calls')} | ${n(t.input)}${versus('input')} | ${n(t.output)}${versus('output')} | ${t.cost.toFixed(4)}${versus('cost')} | ${t.seconds.toFixed(1)}${versus('seconds')} |`)
+      lines.push(`| ${WAYS[way].label} | ${t.correct}/${t.runs} | ${t.rounds}${versus('rounds')} | ${t.calls}${versus('calls')} | ${n(t.input)}${versus('input')} | ${n(t.output)}${versus('output')} | ${t.cost.toFixed(4)}${versus('cost')} | ${t.seconds.toFixed(1)}${versus('seconds')} |`)
     }
     if (base) {
       const others = ways.filter(way => way !== 'built-in')
@@ -172,7 +181,7 @@ export function report(rows) {
       if (totals.both) lines.push(`| lever chosen in a normal install | in at least 80% of runs | ${totals.both.usedLever / totals.both.runs >= 0.8 ? 'pass' : 'FAIL'} (${totals.both.usedLever}/${totals.both.runs}) | - |`)
     }
     const wrong = mine.filter(row => !row.correct)
-    if (wrong.length) lines.push('', 'Wrong or unfinished runs:', ...wrong.map(row => `- ${row.task} · ${WAYS[row.way].label} · run ${row.repeat}: ${row.why} (${row.turns ?? '?'} turns, stop: ${row.stop})`))
+    if (wrong.length) lines.push('', 'Wrong or unfinished runs:', ...wrong.map(row => `- ${row.task} · ${WAYS[row.way].label} · run ${row.repeat}: ${row.why} (${row.rounds} model calls, stop: ${row.stop})`))
     const failures = new Map()
     for (const row of mine) {
       for (const error of row.errors) {
@@ -209,7 +218,7 @@ if (isMain) {
         const row = await runOne(jobs.shift())
         rows.push(row)
         appendFileSync(out, `${JSON.stringify(row)}\n`)
-        console.error(`${row.task} · ${row.way} · run ${row.repeat}: ${row.correct ? 'right' : `WRONG (${row.why})`} · ${row.turns} turns · ${row.calls} calls · ${row.seconds.toFixed(0)} s${row.errors.length ? ` · ${row.errors.length} tool errors` : ''}`)
+        console.error(`${row.task} · ${row.way} · run ${row.repeat}: ${row.correct ? 'right' : `WRONG (${row.why})`} · ${row.rounds} model calls · ${row.calls} tool calls · ${row.seconds.toFixed(0)} s${row.errors.length ? ` · ${row.errors.length} tool errors` : ''}`)
       }
     })
     await Promise.all(workers)
