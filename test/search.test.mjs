@@ -23,11 +23,15 @@ test('glob patterns follow shell rules', () => {
 
 const FILES = {
   'top.ts': 'export const top = 1\n',
-  'src/a.ts': 'import x from "y"\n// TODO: first\nconst a = 1\nconst b = 2\n// todo: second\nconst c = 3\n',
+  'src/a.ts': 'import x from "y"\n// TODO: first\nconst a = 1\nconst b = 2\n// todo: second\nconst c = call(unclosed\n',
   'src/deep/b.js': 'function b() {}\n// TODO third\n',
+  'src/deep/x.tmp': 'tmpmark scratch\n',
+  'src/deep/keep.tmp': 'tmpmark kept\n',
+  'src/deep/.gitignore': '*.tmp\n!keep.tmp\n',
   'node_modules/pkg/index.ts': '// TODO hidden in deps\n',
+  'dist/out.ts': '// TODO built\n',
   '.cache/c.ts': '// TODO hidden folder\n',
-  '.gitignore': 'node_modules/\n',
+  '.gitignore': '# build output\n/dist/\n',
 }
 
 for (const kind of ['ripgrep', 'node']) {
@@ -43,7 +47,16 @@ for (const kind of ['ripgrep', 'node']) {
       assert.deepEqual(await search.glob('**/*.ts'), ['src/a.ts', 'top.ts'])
       assert.deepEqual(await search.glob('src/**/*.{ts,js}'), ['src/a.ts', 'src/deep/b.js'])
       assert.deepEqual(await search.glob('src/a.ts'), ['src/a.ts'])
-      assert.deepEqual(await search.glob('**/*.ts', { hidden: true, ignored: true }), ['.cache/c.ts', 'node_modules/pkg/index.ts', 'src/a.ts', 'top.ts'])
+      assert.deepEqual(await search.glob('**/*.ts', { hidden: true, ignored: true }), ['.cache/c.ts', 'dist/out.ts', 'node_modules/pkg/index.ts', 'src/a.ts', 'top.ts'])
+    })
+
+    test('both ways skip the same files: node_modules without a rule for it, and what .gitignore files name', async () => {
+      const { search } = make()
+      assert.deepEqual(await search.glob('**/*'), ['src/a.ts', 'src/deep/b.js', 'src/deep/keep.tmp', 'top.ts'])
+      assert.deepEqual(await search.grep('tmpmark|built', { files: true }), ['src/deep/keep.tmp'])
+      assert.deepEqual(await search.glob('src/deep/*'), ['src/deep/b.js', 'src/deep/keep.tmp']) // the rules of folders above the start apply too
+      assert.deepEqual(await search.glob('node_modules/**/*.ts'), ['node_modules/pkg/index.ts']) // pointing inside it is a request for it
+      assert.deepEqual(await search.grep('TODO', { path: 'node_modules', files: true }), ['node_modules/pkg/index.ts'])
     })
 
     test('grep content with context, then files and counts', async () => {
@@ -68,7 +81,15 @@ for (const kind of ['ripgrep', 'node']) {
       const hits = await search.grep('const', { max: 2 })
       assert.equal(hits.length, 2)
       assert.ok(env.current.notes.some(note => /stopped at 2 matches/.test(note)))
-      await assert.rejects(search.grep('(unclosed'))
+    })
+
+    test('patterns only JavaScript understands still search; text that is no pattern is searched for as it is', async () => {
+      const { search, env } = make()
+      assert.deepEqual((await search.grep(/(?<=const )b\b/)).map(m => `${m.file}:${m.line}`), ['src/a.ts:4']) // lookbehind
+      assert.deepEqual(await search.grep(/(co)nst \1/, { files: true }), []) // a backreference
+      assert.deepEqual((await search.grep('call(unclosed')).map(m => m.line), [6])
+      assert.ok(env.current.notes.some(note => /"call\(unclosed" is not a regular expression, so it was searched for as plain text/.test(note)))
+      assert.deepEqual((await search.grep('call(unclosed', { fixed: true })).map(m => m.line), [6])
     })
   })
 }

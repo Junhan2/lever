@@ -1,21 +1,26 @@
 // One session: the code context with its helpers, the runs, and the replies they produce. It lives inside the worker
 // thread (worker.mjs); tests use it directly.
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { formatWithOptions } from 'node:util'
 import { help } from './docs.mjs'
-import { createEvaluator } from './evaluate.mjs'
+import { createEvaluator, lastStatement } from './evaluate.mjs'
 import { bytes, capReply, cutMiddle, errorText, isShellResult, render, renderWithin, seconds, settle, shellText, short } from './format.mjs'
 import { createGuard } from './guard.mjs'
 import { createFiles, fingerprint } from './helpers/files.mjs'
 import { createSearch } from './helpers/search.mjs'
-import { createShell } from './helpers/shell.mjs'
+import { CHAIN, createShell } from './helpers/shell.mjs'
 
 const LOG_CAP = 1024 * 1024
 const KEEP_HISTORY = 20
 const KEEP_JOBS = 50
+const KEEP_NAMES = 2000
+// import('./file.mjs') and `import x from './file.mjs'`: project files, not packages
+const FILE_IMPORTS = /\bimport\s*\(\s*(['"`])(\.{0,2}\/[^'"`]+)\1\s*\)|^[ \t]*import\s[^'"\n]*?(['"])(\.{0,2}\/[^'"]+)\3/gm
+// names a run declares: `const a`, `function b`, and the names inside `const { c, d: e } =` or `const [f] =`
+const DECLARED = /\b(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)|\b(?:const|let|var)\s*[{[]([^;]{0,400}?)[}\]]\s*=/g
 
 class RunStopped extends Error {
   constructor(message) {
@@ -29,6 +34,9 @@ export function createSession(config, events = {}) {
   const als = new AsyncLocalStorage()
   const runs = new Map()
   const history = []
+  const earlier = new Set() // names earlier runs declared, to explain "x is not defined"
+  const strays = [] // errors code left behind: thrown by a timer or an event, or a promise nobody awaited
+  const imported = new Map() // project files code has imported, with their change time at the first import
 
   function newRun(id) {
     const controller = new AbortController()
@@ -40,6 +48,7 @@ export function createSession(config, events = {}) {
       logsDropped: 0,
       steps: [],
       notes: [],
+      loose: new Set(), // helper calls whose result nobody has awaited yet (see exists)
       journal: new Map(),
       bytesIn: 0,
       signal: controller.signal,
@@ -162,28 +171,65 @@ export function createSession(config, events = {}) {
     },
   }
 
-  const { evaluate } = createEvaluator(
-    {
-      $,
-      read: files.read,
-      write: files.write,
-      edit: files.edit,
-      exists: files.exists,
-      ls: files.ls,
-      undo: files.undo,
-      glob: search.glob,
-      grep: search.grep,
-      mcp,
-      jobs,
-      state: {},
-      help,
-      sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
-      console,
-      process: processView,
-      require: createRequire(path.join(config.projectDir, 'package.json')),
-    },
-    { dir: config.projectDir },
-  )
+  const helpers = {
+    $,
+    read: files.read,
+    write: files.write,
+    edit: files.edit,
+    exists: files.exists,
+    ls: files.ls,
+    undo: files.undo,
+    glob: search.glob,
+    grep: search.grep,
+    mcp,
+    jobs,
+    state: {},
+    help: topic => help(topic, config.maxOutput),
+    sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+    console,
+    process: processView,
+    require: createRequire(path.join(config.projectDir, 'package.json')),
+  }
+  const { evaluate } = createEvaluator(helpers, { dir: config.projectDir })
+
+  function noteDeclared(code) {
+    for (const match of code.matchAll(DECLARED)) {
+      const names = match[1] ? [match[1]] : match[2].split(',').map(part => part.split(':').pop().split('=')[0].replace('...', '').trim())
+      for (const name of names) if (earlier.size < KEEP_NAMES && /^[A-Za-z_$][\w$]*$/.test(name)) earlier.add(name)
+    }
+  }
+
+  /** Node keeps the first copy of a module it imports. When code imports a project file again after the file changed,
+   * it gets the old code without any sign of it; this adds the sign. */
+  function noteStaleImports(run, code) {
+    for (const match of code.matchAll(FILE_IMPORTS)) {
+      const file = path.resolve(config.projectDir, match[2] ?? match[4])
+      let changed
+      try {
+        changed = statSync(file).mtimeMs
+      } catch {
+        continue
+      }
+      const first = imported.get(file)
+      if (first === undefined) imported.set(file, changed)
+      else if (changed > first) run.note([`${path.relative(config.projectDir, file)} changed after this session first imported it, and import() keeps the copy it loaded first. To run the new code, start a process: $\`node …\``])
+    }
+  }
+
+  /** What to do about an error that code written for other tools runs into here, or null. */
+  function hintFor(error) {
+    const message = String(error?.message ?? '')
+    if (error?.name === 'ReferenceError') {
+      const hidden = /^Cannot access '([^']+)' before initialization$/.exec(message)?.[1]
+      if (hidden && Object.hasOwn(helpers, hidden)) return `"${hidden}" is a helper, and a const or let with the same name hides it in this run. Give the variable another name.`
+      const missing = /^([\w$]+) is not defined$/.exec(message)?.[1]
+      if (missing && earlier.has(missing)) return `"${missing}" was declared in an earlier run. Each run has its own scope: keep values for later runs on state (state.${missing} = …).`
+    }
+    if (error?.name === 'TypeError' && /^\$\(\.\.\.\)\.[\w$]+ is not a function$/.test(message)) {
+      return `$ chains ${CHAIN}.`
+    }
+    return null
+  }
 
   function remember(run) {
     if (run.journal.size === 0) return
@@ -196,6 +242,7 @@ export function createSession(config, events = {}) {
   function describeError(error, code, filename) {
     if (error?.name === 'RunStopped') return `Stopped: ${error.message}`
     let text = errorText(error)
+    const hint = hintFor(error)
     const name = filename ? path.basename(filename).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : null
     const at = name ? new RegExp(`${name}:(\\d+)`).exec(String(error?.stack ?? '')) : null
     if (at) {
@@ -209,7 +256,7 @@ export function createSession(config, events = {}) {
         text += `\n  hint: line ${line} starts with "${source.trim()[0]}" and the line before has no ";", so JavaScript reads them as one expression. Add ";" or use return.`
       }
     }
-    return text
+    return hint ? `${text}\n  hint: ${hint}` : text
   }
 
   function summary(run, returned) {
@@ -234,14 +281,28 @@ export function createSession(config, events = {}) {
     const changed = [...run.journal.keys()].map(file => path.relative(config.projectDir, file) || file)
     if (changed.length) lines.push(`changed: ${changed.slice(0, 10).join(', ')}${changed.length > 10 ? ` (+${changed.length - 10} more)` : ''} · undo() puts them back`)
     for (const note of run.notes) lines.push(`note: ${note}`)
+    if (run.loose.size) {
+      const calls = [...new Set([...run.loose].map(call => call.label))]
+      lines.push(`note: ${calls.slice(0, 3).join(', ')} ${calls.length === 1 ? 'was' : 'were'} called without await, so the result was never read (a promise is always truthy). Write: await exists(path)`)
+    }
+    for (const text of strays.splice(0)) lines.push(`note: thrown outside the awaited code (by a timer, an event, or a promise without await): ${text}`)
     return lines.join('\n')
+  }
+
+  /** The reply of a run that has nothing to show. It says so in a way that tells an empty result (a filter that matched
+   * nothing) from no result, and says why when the code ends with a declaration. */
+  function nothingReturned(code, value) {
+    if (value === '') return '(done: the code returned an empty string)'
+    const range = lastStatement(code)
+    const declares = range && /^(?:const|let|var)\s/.test(code.slice(range.start, range.end))
+    return declares ? '(done, nothing returned: the code ends with a declaration. End with the value, or return it, to see a result.)' : '(done, nothing returned)'
   }
 
   function compose(run, code, filename, value, error) {
     const logs = run.logs.length ? run.logs.join('\n') + (run.logsDropped ? `\n…[${run.logsDropped} more log lines dropped]` : '') : ''
     // The value gets the room the logs leave, and long strings inside it are cut only as much as that needs.
     const result = error ? { text: describeError(error, code, filename) } : renderWithin(value, Math.max(1000, config.maxOutput - logs.length))
-    const body = text => [logs, text].filter(Boolean).join('\n') || '(done, nothing returned)'
+    const body = text => [logs, text].filter(Boolean).join('\n') || nothingReturned(code, value)
     const capped = capReply(body(result.text), { maxOutput: config.maxOutput, spillDir: config.spillDir, label: `run-${process.pid}-${run.id}`, whole: body(result.whole ?? result.text) })
     const footer = summary(run, Buffer.byteLength(capped.text))
     return { text: footer ? `${capped.text}\n---\n${footer}` : capped.text, isError: Boolean(error), file: capped.file }
@@ -258,16 +319,22 @@ export function createSession(config, events = {}) {
     })
     stopped.catch(() => {})
     try {
+      noteStaleImports(run, code)
       const job = evaluate(code, { timeoutMs })
       filename = job.filename
+      if (job.repaired) run.note(['the code had backticks escaped outside a string ($\\`…\\`), which is not JavaScript; it ran with those backslashes removed'])
       value = await Promise.race([job.promise.then(result => settle(result)), stopped])
     } catch (thrown) {
       error = thrown ?? new Error('the code threw undefined')
     } finally {
       run.signal.removeEventListener('abort', onAbort)
     }
+    // one turn of the event loop, so a promise this code rejected without awaiting it is reported in this reply
+    await new Promise(resolve => setImmediate(resolve))
     remember(run)
-    return compose(run, code, filename, value, error)
+    const reply = compose(run, code, filename, value, error)
+    noteDeclared(code)
+    return reply
   }
 
   /** Runs code and resolves to its reply { text, isError, file }. Never rejects. */
@@ -310,5 +377,10 @@ export function createSession(config, events = {}) {
     await mcp?.close?.()
   }
 
-  return { run, stop, detach, close, jobs, env }
+  /** Keeps an error that reached the thread from outside any awaited code, for the next reply to show. */
+  function stray(error) {
+    if (strays.length < 5) strays.push(short(errorText(error), 300))
+  }
+
+  return { run, stop, detach, close, stray, jobs, env }
 }

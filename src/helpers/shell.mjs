@@ -1,12 +1,23 @@
 // $`cmd ${value}`: runs a shell command as a step. Interpolated values are quoted; arrays become several arguments.
-// The promise starts on the next microtask, so `.nothrow()` or `.timeout(ms)` chained right away still apply.
+// The promise starts on the next microtask, so `.nothrow()`, `.cwd(dir)` or `.timeout(ms)` chained right away still apply.
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
 const OUTPUT_CAP = 16 * 1024 * 1024
 const SAFE = /^[\w@%+=:,./-]+$/
+const OPTIONS = ['cwd', 'env', 'timeout', 'nothrow', 'input', 'quiet']
+/** What a command chains, for the hint when code calls a method that other shells have and this one does not. */
+export const CHAIN = '.nothrow() .cwd(dir) .env({…}) .timeout(ms) .input(text) .quiet(), then .text() .lines() .json()'
+
+const isFolder = dir => {
+  try {
+    return statSync(dir).isDirectory()
+  } catch {
+    return false
+  }
+}
 
 export function quote(value) {
   if (value === null || value === undefined) return "''"
@@ -118,14 +129,20 @@ export function createShell(env) {
       return { refused: verdict.deny }
     }
     const finalCommand = typeof verdict.input?.command === 'string' ? verdict.input.command : command
-    const cwd = options.cwd ? path.resolve(env.projectDir, options.cwd) : env.projectDir
+    const cwd = options.cwd ? path.resolve(env.projectDir, expandHome(String(options.cwd))) : env.projectDir
+    if (!isFolder(cwd)) {
+      // spawn reports a missing folder as "spawn /bin/bash ENOENT", which reads as if the shell were missing
+      run.step({ kind: 'sh', label: finalCommand, ok: false, detail: 'no such folder', ms: Date.now() - started })
+      return { error: new Error(`$: the folder to run in does not exist: ${options.cwd} (cwd is relative to the project folder)`) }
+    }
+    const input = options.input ?? null
     const result = await new Promise(resolve => {
       let child
       try {
         child = spawn(shell.file, shell.args(finalCommand), {
           cwd,
           env: { ...process.env, ...options.env },
-          stdio: ['ignore', 'pipe', 'pipe'],
+          stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
           detached: process.platform !== 'win32',
           windowsHide: true,
         })
@@ -134,6 +151,10 @@ export function createShell(env) {
         return
       }
       env.onChild?.(child.pid, true)
+      if (input !== null) {
+        child.stdin.on('error', () => {}) // the command may stop reading before the text ends
+        child.stdin.end(typeof input === 'string' || ArrayBuffer.isView(input) ? input : String(input))
+      }
       const out = []
       const err = []
       let outBytes = 0
@@ -195,6 +216,8 @@ export function createShell(env) {
       this.options = { ...options }
       this.run = env.run()
       this.started = null
+      const unknown = Object.keys(this.options).filter(key => !OPTIONS.includes(key))
+      if (unknown.length) this.run.note([`$ ignored the option${unknown.length === 1 ? '' : 's'} ${unknown.join(', ')} (it takes ${OPTIONS.join(', ')})`])
       queueMicrotask(() => this.start())
     }
 
@@ -206,6 +229,7 @@ export function createShell(env) {
     settled() {
       return this.start().then(outcome => {
         if (outcome.refused) throw new StepRefused(`$ ${this.command}`, outcome.refused)
+        if (outcome.error) throw outcome.error
         if (!outcome.result.ok && !this.options.nothrow) throw new ShellError(outcome.result)
         return outcome.result
       })
@@ -230,6 +254,30 @@ export function createShell(env) {
 
     timeout(ms) {
       this.options.timeout = ms
+      return this
+    }
+
+    /** The folder to run in, relative to the project folder. */
+    cwd(dir) {
+      this.options.cwd = dir
+      return this
+    }
+
+    /** More environment variables, on top of the server's own. */
+    env(vars) {
+      this.options.env = { ...this.options.env, ...vars }
+      return this
+    }
+
+    /** Text or bytes for the command's standard input. */
+    input(data) {
+      this.options.input = data
+      return this
+    }
+
+    /** Output never goes anywhere but the result, so this changes nothing; it is here because code written for other
+     * shells calls it. */
+    quiet() {
       return this
     }
 

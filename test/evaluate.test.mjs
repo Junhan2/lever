@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { createEvaluator, lastStatement, wrapCode } from '../src/evaluate.mjs'
+import { createEvaluator, lastStatement, unescapeBackticks, wrapCode } from '../src/evaluate.mjs'
 
 const lastOf = code => {
   const range = lastStatement(code)
@@ -15,11 +15,39 @@ test('finds the last statement across semicolons and line breaks', () => {
   assert.equal(lastOf('foo()\n  .bar()\n  .baz()'), 'foo()\n  .bar()\n  .baz()')
   assert.equal(lastOf('const x = 1\n(x)'), 'const x = 1\n(x)') // a line starting with ( continues the statement
   assert.equal(lastOf('const t = `a ${b + `c ${d}`} e`\nt.length'), 't.length')
+  assert.equal(lastOf('const n = 2;\n`total: ${n} of ${n + 1}`'), '`total: ${n} of ${n + 1}`') // a template with ${} as the last thing
+  assert.equal(lastOf('const dir = "src"\n$`ls ${dir}`'), '$`ls ${dir}`')
   assert.equal(lastOf('const s = "x;y" // a; b\n/* c;\n d */ s'), 's')
   assert.equal(lastOf('const r = /[;"]/g\nr.source'), 'r.source')
   assert.equal(lastOf('if (a) {\n  b()\n} else {\n  c()\n}'), 'if (a) {\n  b()\n} else {\n  c()\n}')
   assert.equal(lastOf('const n = 4 / 2 / 1\nn'), 'n')
   assert.equal(lastOf('   '), null)
+})
+
+test('the block of a statement ends it, so an expression on the next line is the result', async () => {
+  assert.equal(lastOf('for (const f of files) {\n  use(f)\n}\n({ done: true })'), '({ done: true })')
+  assert.equal(lastOf('if (a) {\n} else {\n}\n[1, 2].length'), '[1, 2].length')
+  assert.equal(lastOf('try { a() } catch (e) {} finally {}\n`text`'), '`text`')
+  assert.equal(lastOf('function f() {}\n(f())'), '(f())')
+  assert.equal(lastOf('const f = () => {\n}\n(1 + 1)'), '(1 + 1)') // an arrow function cannot be called this way
+  assert.equal(lastOf('let i = 0\ndo { i++ } while (i < 3)\ni'), 'i')
+  // a function expression or an object can be called or indexed on the next line: JavaScript reads one statement
+  assert.equal(lastOf('const g = function (v) { return v }\n(4)'), 'const g = function (v) { return v }\n(4)')
+  const { evaluate } = createEvaluator({})
+  assert.equal(JSON.stringify(await evaluate('const out = []\nfor (const n of [1, 2]) {\n  out.push(n * 2)\n}\n({ out })').promise), '{"out":[2,4]}')
+  assert.equal(await evaluate('const g = function (v) { return v * 2 }\n(4)\ng').promise, 8)
+})
+
+test('backticks that arrive escaped outside a string are repaired, and only there', async () => {
+  assert.equal(unescapeBackticks('const r = await $\\`echo \\${name}\\`.text()'), 'const r = await $`echo ${name}`.text()')
+  assert.equal(unescapeBackticks('const inner = `use $\\`ls\\` in a string`\ninner'), null) // inside a template they are right
+  assert.equal(unescapeBackticks('const a = "a \\` b" // and \\` here'), null)
+  const { evaluate } = createEvaluator({ $: (strings, ...values) => String.raw({ raw: strings }, ...values) })
+  const repaired = evaluate('const text = `a\nb`\nconst name = "x"\n$\\`echo \\${name}\\`')
+  assert.equal(repaired.repaired, true)
+  assert.equal(await repaired.promise, 'echo x')
+  assert.equal(evaluate('1 + 1').repaired, false)
+  await assert.rejects(evaluate('const = \\`x').promise, /SyntaxError|Unexpected|Invalid/) // other mistakes stay as they are
 })
 
 test('a template literal holding code lines is never split or changed', () => {

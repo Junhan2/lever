@@ -1,12 +1,16 @@
 // Turns what a run produced into the short text the model reads. Values made inside the code come from another
 // realm (the REPL context), so type checks use tags and duck typing, never instanceof.
 import { randomBytes } from 'node:crypto'
-import { lstatSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
 const tagOf = value => Object.prototype.toString.call(value).slice(8, -1)
 const MAX_DEPTH = 6
+const MIN_STRING = 200 // long strings are never cut shorter than this to make a reply fit
+const SAVED_SUFFIX = 4 // random bytes at the end of a saved file's name
+const SPILL_MAX = 16 * 1024 * 1024 // the most text one saved reply holds
+const SPILL_DAYS = 7 // saved replies older than this are removed when the server starts
 
 /** One line of at most `max` characters, white space folded. */
 export const short = (text, max = 60) => {
@@ -115,7 +119,6 @@ export function toPlain(value, { maxString = 2000, maxItems = 200 } = {}) {
 }
 
 const isPrimitive = v => v === null || ['string', 'number', 'boolean'].includes(typeof v)
-const indent = text => text.replace(/^/gm, '  ')
 const MORE = /^…\+\d+ more$/
 
 /** A grep() match, also after the code filtered or mapped the list. */
@@ -147,9 +150,10 @@ function listText(items) {
   return tail ? `${text}\n${tail}` : text
 }
 
-/** The returned value as text: strings as they are, shell results as their output, a top-level object as
- * `key: value` lines, grep matches and long path lists one per line, other arrays of objects one JSON per line,
- * anything else as compact JSON. */
+/** The returned value as text: strings as they are, shell results as their output, grep matches and long path lists
+ * one per line, other arrays of objects one JSON per line, anything else as compact JSON. A top-level object prints
+ * its one-line values as `key: value` lines, then each value of several lines under a `==> key <==` line, exactly as
+ * it is: file text shown with added indentation gets copied back with the wrong indentation. */
 export function render(value, limits = {}) {
   if (value === undefined) return ''
   if (typeof value === 'string') return value
@@ -164,23 +168,45 @@ export function render(value, limits = {}) {
     return [`(${Array.isArray(value) ? value.length : plain.length} items)`, ...plain.map(item => JSON.stringify(item))].join('\n')
   }
   const lines = []
+  const blocks = []
   for (const [key, item] of Object.entries(plain)) {
-    const list = Array.isArray(item) ? listText(item) : null
-    if (list !== null) lines.push(`${key}:\n${indent(list)}`)
-    else if (typeof item === 'string' && item.includes('\n')) lines.push(`${key}:\n${indent(item)}`)
-    else lines.push(`${key}: ${typeof item === 'string' ? item : JSON.stringify(item)}`)
+    const text = Array.isArray(item) ? listText(item) : typeof item === 'string' && item.includes('\n') ? item : null
+    if (text === null) lines.push(`${key}: ${typeof item === 'string' ? item : JSON.stringify(item)}`)
+    else blocks.push(`==> ${key} <==\n${text.endsWith('\n') ? text.slice(0, -1) : text}`)
   }
-  return lines.join('\n')
+  return [...lines, ...blocks].join('\n')
 }
 
-/** Renders a value in at most `max` characters when it can. Nothing is cut when the whole text fits; otherwise long
- * strings are cut in the middle and long lists shortened, only as much as needed. `whole` is the uncut text. */
+/** The text for the largest limit from `low` to `high` whose text has at most `max` characters, or null when not even
+ * `low` fits. `textAt(limit)` must not get shorter as the limit grows. */
+function largestThatFits(textAt, low, high, max) {
+  let best = textAt(low)
+  if (best.length > max) return null
+  // close is enough: stop once the range is within a sixteenth of the limit
+  while (high - low > Math.max(1, low >> 4)) {
+    const middle = Math.ceil((low + high) / 2)
+    const text = textAt(middle)
+    if (text.length <= max) {
+      best = text
+      low = middle
+    } else high = middle - 1
+  }
+  return best
+}
+
+/** Renders a value in at most `max` characters when it can. Nothing is cut when the whole text fits. Otherwise the
+ * longest strings are cut first, in the middle and no more than needed, so short values and lists stay whole; lists
+ * are shortened only when cutting strings is not enough. `whole` is the uncut text. */
 export function renderWithin(value, max) {
   const whole = render(value, { maxString: Infinity, maxItems: Infinity })
-  let text = whole
-  for (let maxString = max; text.length > max && maxString >= 200 && typeof value !== 'string'; maxString = Math.floor(maxString / 2)) {
-    text = render(value, { maxString, maxItems: Math.floor(maxString / 40) })
-  }
+  if (whole.length <= max || typeof value === 'string') return { text: whole, whole }
+  // A list with more items than this cannot fit anyway, so the first pass may shorten it. That also bounds the work
+  // of each try on a value with millions of rows.
+  const listFirst = Math.max(50, Math.floor(max / 20))
+  const text =
+    largestThatFits(maxString => render(value, { maxString, maxItems: listFirst }), MIN_STRING, max, max) ??
+    largestThatFits(maxItems => render(value, { maxString: MIN_STRING, maxItems }), 3, listFirst, max) ??
+    render(value, { maxString: MIN_STRING, maxItems: 3 })
   return { text, whole }
 }
 
@@ -202,10 +228,9 @@ function privateDir(dir) {
   return fallbackDir
 }
 
-/** Saves `text` under `dir` with an unguessable name and returns the path, or null when it cannot be written. */
 /** Writes data to a new file only this user can read, in the private folder `dir`. Throws when it cannot. */
 export function saveFile(data, dir, label, ext = 'txt') {
-  const file = path.join(privateDir(dir), `${label}-${randomBytes(4).toString('hex')}.${ext}`)
+  const file = path.join(privateDir(dir), `${label}-${randomBytes(SAVED_SUFFIX).toString('hex')}.${ext}`)
   writeFileSync(file, data, { mode: 0o600, flag: 'wx' })
   return file
 }
@@ -219,13 +244,30 @@ function spill(text, dir, label) {
   }
 }
 
-/** Caps a reply at maxOutput characters. When anything was left out, `whole` (the uncut text) goes to a file. */
+/** Caps a reply at maxOutput characters. When anything was left out, `whole` (the uncut text) goes to a file; text
+ * beyond SPILL_MAX loses its middle there too, so code that returns huge values in a loop cannot fill the disk. */
 export function capReply(text, { maxOutput, spillDir, label, whole = text }) {
   if (text.length <= maxOutput && whole === text) return { text, file: null }
-  const file = spill(whole, spillDir, label)
-  const note = file ? ` · full text: ${file}` : ''
+  const tooBig = whole.length > SPILL_MAX
+  const file = spill(tooBig ? cutMiddle(whole, SPILL_MAX) : whole, spillDir, label)
+  const note = file ? ` · ${tooBig ? `text with the middle cut (it was over ${bytes(SPILL_MAX)})` : 'full text'}: ${file}` : ''
   if (text.length <= maxOutput) return { text: `${text}\n…[long values shortened${note}]`, file }
   return { text: cutMiddle(text, maxOutput, note), file }
+}
+
+/** Removes the saved replies in `dir` that are older than SPILL_DAYS. Only files with the names saveFile gives. */
+export function pruneSpill(dir, now = Date.now()) {
+  const saved = new RegExp(`-[0-9a-f]{${SAVED_SUFFIX * 2}}\\.\\w+$`)
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!saved.test(name)) continue
+      const file = path.join(dir, name)
+      const info = statSync(file)
+      if (info.isFile() && now - info.mtimeMs > SPILL_DAYS * 86_400_000) unlinkSync(file)
+    }
+  } catch {
+    // nothing saved yet, or not ours to clean
+  }
 }
 
 export function bytes(n) {

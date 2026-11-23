@@ -19,10 +19,14 @@ const PUNCT = [
 ]
 const ENDS_EXPRESSION = new Set([')', ']', '}', '++', '--'])
 const NEW_STATEMENT_PUNCT = new Set(['!', '~', '++', '--', '{', ';'])
+const BLOCK_HEADS = new Set(['if', 'for', 'while', 'switch', 'try', 'do', 'function', 'async', 'class']) // statements that end with a block
+const BLOCK_OPENERS = new Set(['else', 'try', 'finally', 'do', 'catch']) // words a block can follow directly
+const BLOCK_CONTINUES = new Set(['else', 'catch', 'finally'])
 
 /** Finds the range of the last top-level statement: { start, end } in `code`, or null when there is none.
  * Strings, template literals (with nested `${}`), comments and regular expressions are skipped. A line break ends a
- * statement only where JavaScript's automatic semicolon insertion would end it. */
+ * statement only where JavaScript's automatic semicolon insertion would end it, and the block of an if, for, while,
+ * try, function or class ends its statement, so `for (…) {…}` followed by `({ … })` is two statements. */
 export function lastStatement(code) {
   const n = code.length
   let i = 0
@@ -33,6 +37,9 @@ export function lastStatement(code) {
   let current = -1 // start of the statement in progress at depth 0
   let last = null
   let lastEnd = -1 // end of the last significant token at depth 0
+  let head = '' // the first word of that statement ('' when it starts with something else)
+  let brace = null // what the open top-level { is: 'block' (a statement's body), 'arrow' (an arrow function's) or 'value'
+  let closed = null // the same for a top-level } when it is the last token
 
   const endsStatement = token =>
     token.kind === 'word' ? !OPEN_WORDS.has(token.value) : token.kind === 'punct' ? ENDS_EXPRESSION.has(token.value) : true
@@ -43,12 +50,42 @@ export function lastStatement(code) {
     (prev.kind === 'punct' && (!ENDS_EXPRESSION.has(prev.value) || (prev.value === '}' && depth === 0))) ||
     (prev.kind === 'word' && REGEX_AFTER_WORD.has(prev.value))
 
+  const begin = (start, kind, value) => {
+    current = start
+    head = kind === 'word' ? value : ''
+  }
+  /** Whether the statement in progress ended before the token that comes now. */
+  const endedBefore = (kind, value) => {
+    if (closed === 'block') {
+      // the body of a statement ends it, whatever follows, except the words that carry it on
+      const carriesOn = kind === 'word' && (BLOCK_CONTINUES.has(value) || (value === 'while' && head === 'do'))
+      return !carriesOn && !(kind === 'punct' && value === ';')
+    }
+    if (!newline || !prev) return false
+    // an arrow function cannot be called or indexed, so ( [ or ` on the next line starts a new statement
+    if (closed === 'arrow' && (kind === 'template' || (kind === 'punct' && (value === '(' || value === '[')))) return true
+    return endsStatement(prev) && !continuesStatement(kind, value)
+  }
+  /** What a { at depth 0 opens, from the statement it is in and the token before it. */
+  const braceKind = () => {
+    if (prev?.kind === 'punct' && prev.value === '=>') return 'arrow'
+    if (!BLOCK_HEADS.has(head)) return 'value'
+    if (head === 'class' || (prev?.kind === 'punct' && prev.value === ')')) return 'block'
+    return prev?.kind === 'word' && BLOCK_OPENERS.has(prev.value) ? 'block' : 'value'
+  }
+
   const token = (start, end, kind, value) => {
     if (depth === 0) {
-      if (current === -1) current = start
-      else if (newline && prev && endsStatement(prev) && !continuesStatement(kind, value)) {
+      if (current === -1) begin(start, kind, value)
+      else if (endedBefore(kind, value)) {
         last = { start: current, end: lastEnd }
-        current = start
+        begin(start, kind, value)
+      }
+      closed = null
+      if (kind === 'punct' && value === '{') brace = braceKind()
+      else if (kind === 'punct' && value === '}') {
+        closed = brace
+        brace = null
       }
       lastEnd = end
     }
@@ -96,6 +133,8 @@ export function lastStatement(code) {
         else if (code[i] === '$' && code[i + 1] === '{') break
         else i++
       }
+      // the rest of a template after a `${ }` is no token of its own, but the statement reaches to its end
+      if (resuming && depth === 0) lastEnd = i + (code[i] === '$' ? 2 : 1)
       if (code[i] === '$') {
         i += 2
         templates.push(depth)
@@ -216,6 +255,65 @@ export function hoistImports(code) {
   return changed ? lines.join('\n') : null
 }
 
+/** Code that was written inside a template literal sometimes arrives with its own backticks still escaped
+ * (`$\`npm test\``), which never compiles. Returns the code with those backslashes removed (and `\${` inside such a
+ * template turned back into `${`), or null when no escaped backtick stands outside a string, template or comment. */
+export function unescapeBackticks(code) {
+  const n = code.length
+  const open = [] // one entry per open template literal: null in its text, else the brace depth where its ${ began
+  let depth = 0
+  let out = ''
+  let changed = false
+  let i = 0
+  const copyTo = end => {
+    out += code.slice(i, end)
+    i = end
+  }
+  while (i < n) {
+    const c = code[i]
+    if (open.length && open.at(-1) === null) {
+      // the text of a template literal
+      if (c === '\\') copyTo(i + 2)
+      else if (c === '`') {
+        open.pop()
+        copyTo(i + 1)
+      } else if (c === '$' && code[i + 1] === '{') {
+        open[open.length - 1] = depth++
+        copyTo(i + 2)
+      } else copyTo(i + 1)
+      continue
+    }
+    if (c === '/' && code[i + 1] === '/') {
+      const end = code.indexOf('\n', i)
+      copyTo(end === -1 ? n : end)
+    } else if (c === '/' && code[i + 1] === '*') {
+      const end = code.indexOf('*/', i + 2)
+      copyTo(end === -1 ? n : end + 2)
+    } else if (c === '"' || c === "'") {
+      let end = i + 1
+      while (end < n && code[end] !== c && code[end] !== '\n') end += code[end] === '\\' ? 2 : 1
+      copyTo(end + 1)
+    } else if (c === '`') {
+      open.push(null)
+      copyTo(i + 1)
+    } else if (c === '\\' && code[i + 1] === '`') {
+      const end = code.indexOf('\\`', i + 2)
+      if (end === -1) return null
+      out += `\`${code.slice(i + 2, end).replace(/\\\$\{/g, '${')}\``
+      i = end + 2
+      changed = true
+    } else {
+      if (c === '{') depth++
+      else if (c === '}') {
+        depth--
+        if (open.length && open.at(-1) === depth) open[open.length - 1] = null
+      }
+      copyTo(i + 1)
+    }
+  }
+  return changed ? out : null
+}
+
 /** A fresh vm context holding the helpers and the Node globals code usually reaches for. With `dir`, the code's file
  * name sits in that folder, so `import('pkg')` finds the packages installed there. */
 export function createEvaluator(globals = {}, { dir } = {}) {
@@ -238,14 +336,29 @@ export function createEvaluator(globals = {}, { dir } = {}) {
     const name = `run-${++count}.js`
     const filename = dir ? path.join(dir, name) : name
     const options = { filename, lineOffset: -1, ...(importModuleDynamically ? { importModuleDynamically } : {}) }
+    const compile = text => new vm.Script(wrapCode(hoistImports(text) ?? text).source, options)
     let promise
+    let repaired = false
     try {
-      const script = new vm.Script(wrapCode(hoistImports(code) ?? code).source, options)
+      let script
+      try {
+        script = compile(code)
+      } catch (error) {
+        // the one repair: backticks that arrive escaped outside a string, when removing the backslashes makes it compile
+        const fixed = error?.name === 'SyntaxError' ? unescapeBackticks(code) : null
+        if (fixed === null) throw error
+        try {
+          script = compile(fixed)
+          repaired = true
+        } catch {
+          throw error
+        }
+      }
       promise = script.runInContext(context, { timeout: timeoutMs, breakOnSigint: false })
     } catch (error) {
       promise = Promise.reject(error)
     }
-    return { filename, promise }
+    return { filename, promise, repaired }
   }
 
   return { evaluate, context }

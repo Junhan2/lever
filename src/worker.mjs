@@ -14,6 +14,11 @@ const session = createSession(config, {
   mcp: env => createMcp(env, config),
 })
 
+// Code can leave work behind that fails later: a timer that throws, a promise nobody awaits. That must not end this
+// thread, which would silently lose state, jobs and the undo history; the next reply reports it instead.
+process.on('uncaughtException', error => session.stray(error))
+process.on('unhandledRejection', reason => session.stray(reason))
+
 parentPort.on('message', message => {
   if (message.type === 'run') {
     session.run(message.id, message.code, { timeoutMs: message.timeoutMs, softLimitMs: message.softLimitMs }).then(reply => parentPort.postMessage({ type: 'done', id: message.id, reply }))
