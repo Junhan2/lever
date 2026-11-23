@@ -9,7 +9,7 @@ import { help } from './docs.mjs'
 import { createEvaluator } from './evaluate.mjs'
 import { bytes, capReply, cutMiddle, errorText, isShellResult, render, renderWithin, seconds, settle, shellText, short } from './format.mjs'
 import { createGuard } from './guard.mjs'
-import { createFiles } from './helpers/files.mjs'
+import { createFiles, fingerprint } from './helpers/files.mjs'
 import { createSearch } from './helpers/search.mjs'
 import { createShell } from './helpers/shell.mjs'
 
@@ -188,7 +188,7 @@ export function createSession(config, events = {}) {
   function remember(run) {
     if (run.journal.size === 0) return
     const after = new Map()
-    for (const file of run.journal.keys()) after.set(file, existsSync(file) ? readFileSync(file) : null)
+    for (const file of run.journal.keys()) after.set(file, existsSync(file) ? fingerprint(readFileSync(file)) : null)
     history.push({ id: run.id, journal: run.journal, after })
     if (history.length > KEEP_HISTORY) history.shift()
   }
@@ -251,8 +251,10 @@ export function createSession(config, events = {}) {
     let value
     let error = null
     let filename = null
+    let onAbort
     const stopped = new Promise((_, reject) => {
-      run.signal.addEventListener('abort', () => reject(new RunStopped(String(run.signal.reason ?? 'stopped'))), { once: true })
+      onAbort = () => reject(new RunStopped(String(run.signal.reason ?? 'stopped')))
+      run.signal.addEventListener('abort', onAbort, { once: true })
     })
     stopped.catch(() => {})
     try {
@@ -261,6 +263,8 @@ export function createSession(config, events = {}) {
       value = await Promise.race([job.promise.then(result => settle(result)), stopped])
     } catch (thrown) {
       error = thrown ?? new Error('the code threw undefined')
+    } finally {
+      run.signal.removeEventListener('abort', onAbort)
     }
     remember(run)
     return compose(run, code, filename, value, error)
@@ -283,6 +287,8 @@ export function createSession(config, events = {}) {
         entry.reply = reply
         entry.status = record.signal.aborted ? 'stopped' : reply.isError ? 'failed' : 'done'
         entry.endedAt = Date.now()
+        // a finished job keeps only what jobs.list and stop read, not its logs, steps and file copies
+        entry.run = { steps: record.steps.slice(-1), abort: record.abort }
         return reply
       })
     return entry.promise

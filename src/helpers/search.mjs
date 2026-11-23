@@ -5,7 +5,7 @@ import { existsSync, promises as fs, statSync } from 'node:fs'
 import path from 'node:path'
 import { types } from 'node:util'
 import { escapeRegExp, GLOB_CHARS, globRoot, globToRegExp } from '../glob.mjs'
-import { checkStep, expandHome } from './shell.mjs'
+import { checkStep, eachLine, expandHome } from './shell.mjs'
 
 const LINE_MAX = 300
 
@@ -45,14 +45,10 @@ function ripgrep(rg, args, cwd, onLine) {
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', chunk => {
       if (stopped) return
-      const lines = (rest + chunk).split('\n')
-      rest = lines.pop()
-      for (const line of lines) {
-        if (line && onLine(line) === false) {
-          stopped = true
-          child.kill()
-          return
-        }
+      rest = eachLine(rest, chunk, line => !line || onLine(line))
+      if (rest === null) {
+        stopped = true
+        child.kill()
       }
     })
     child.stderr.on('data', chunk => {
@@ -96,7 +92,7 @@ export function createSearch(env) {
 
   /** Leaves out what a permission rule keeps from being read, and says how many. */
   const visible = (items, fileOf, run) => {
-    const hidden = new Set(items.map(fileOf).filter(file => env.guard.hidden(absolute(file))))
+    const hidden = new Set([...new Set(items.map(fileOf))].filter(file => env.guard.hidden(absolute(file))))
     if (hidden.size === 0) return items
     run.note([`left out ${hidden.size} file${hidden.size === 1 ? '' : 's'} that permission rules keep from being read`])
     return items.filter(item => !hidden.has(fileOf(item)))
@@ -288,17 +284,18 @@ export function createSearch(env) {
     const files = []
     const counts = {}
     let truncated = false
-    const visit = async file => {
-      const full = path.resolve(env.projectDir, file)
-      let data
+    const load = async file => {
       try {
+        const full = path.resolve(env.projectDir, file)
         const info = await fs.stat(full)
-        if (info.size > 10 * 1024 * 1024) return
-        data = await fs.readFile(full)
+        return info.size > 10 * 1024 * 1024 ? null : await fs.readFile(full)
       } catch {
-        return
+        return null
       }
-      if (data.subarray(0, 8000).includes(0)) return
+    }
+    const visit = async (file, loading = load(file)) => {
+      const data = await loading
+      if (data === null || data.subarray(0, 8000).includes(0)) return
       const lines = data.toString('utf8').split(/\r?\n/)
       let count = 0
       let lastAfterEnd = 0
@@ -338,11 +335,16 @@ export function createSearch(env) {
       }
       if (info.isFile()) await visit(target)
       else {
+        // files are read up to 32 ahead but matched in walk order, so the results stay the same
+        const ahead = []
         for await (const file of walk(full, scopeOf(options))) {
           const shown = path.isAbsolute(target) ? file : toSlash(path.relative(env.projectDir, file))
-          if (wanted(shown)) await visit(shown)
+          if (!wanted(shown)) continue
+          ahead.push([shown, load(shown)])
+          if (ahead.length >= 32) await visit(...ahead.shift())
           if (truncated) break
         }
+        while (ahead.length && !truncated) await visit(...ahead.shift())
       }
     }
     if (truncated) options.run.note([`grep stopped at ${options.max} matches; narrow the pattern or pass { max }`])

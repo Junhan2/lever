@@ -50,6 +50,20 @@ export async function checkStep(env, run, tool, input, label, { kind = tool.toLo
   return verdict
 }
 
+/** Hands the complete lines in a text chunk to onLine and returns the unfinished end, to pass back in as `rest` with the
+ * next chunk. Only the new chunk is scanned, so a long line that arrives in many chunks stays linear. onLine may
+ * return false to stop; eachLine then returns null. */
+export function eachLine(rest, chunk, onLine) {
+  let start = 0
+  for (let at = chunk.indexOf('\n'); at !== -1; at = chunk.indexOf('\n', start)) {
+    const line = rest + chunk.slice(start, at)
+    rest = ''
+    start = at + 1
+    if (onLine(line) === false) return null
+  }
+  return rest + chunk.slice(start)
+}
+
 /** Home-relative paths (~ and ~/...) as absolute ones. */
 export const expandHome = input => (input === '~' || input.startsWith('~/') ? path.join(os.homedir(), input.slice(1)) : input)
 

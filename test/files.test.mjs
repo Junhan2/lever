@@ -2,12 +2,12 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { test } from 'node:test'
-import { createFiles } from '../src/helpers/files.mjs'
+import { createFiles, fingerprint } from '../src/helpers/files.mjs'
 import { fakeRun, makeEnv, project } from './support.mjs'
 
 const finish = async (env, run) => {
   const after = new Map()
-  for (const file of run.journal.keys()) after.set(file, existsSync(file) ? readFileSync(file) : null)
+  for (const file of run.journal.keys()) after.set(file, existsSync(file) ? fingerprint(readFileSync(file)) : null)
   env.history.push({ id: run.id, journal: run.journal, after })
 }
 

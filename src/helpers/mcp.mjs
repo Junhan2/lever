@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url'
 import { NAME, readJson, VERSION } from '../config.mjs'
 import { saveFile, short } from '../format.mjs'
 import { settingsFiles } from '../guard.mjs'
-import { checkStep, killTree } from './shell.mjs'
+import { checkStep, eachLine, killTree } from './shell.mjs'
 
 const CLIENT = { name: NAME, version: VERSION }
 const OLD_PROTOCOL = '2025-11-25'
@@ -127,9 +127,9 @@ class Client {
     let rest = ''
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', chunk => {
-      const lines = (rest + chunk).split('\n')
-      rest = lines.pop()
-      for (const line of lines) if (line.trim()) this.receive(line)
+      rest = eachLine(rest, chunk, line => {
+        if (line.trim()) this.receive(line)
+      })
     })
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', chunk => {

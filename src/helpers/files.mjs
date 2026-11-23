@@ -1,5 +1,6 @@
 // read / write / edit / exists / ls, plus the undo journal. Every change keeps the file's earlier content so undo()
 // can put it back; writes keep the file's mode because they rewrite it in place.
+import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { checkStep, expandHome } from './shell.mjs'
@@ -31,6 +32,9 @@ function missHint(text, old) {
   }
   return 'no part of it was found'
 }
+
+/** What undo compares a file with, to see whether it changed since the run wrote it. */
+export const fingerprint = data => createHash('sha256').update(data).digest('base64')
 
 /** env: { projectDir, guard, run(), history } */
 export function createFiles(env) {
@@ -187,7 +191,7 @@ export function createFiles(env) {
     for (const [file, before] of target.journal) {
       const written = target.after.get(file)
       const now = await fs.readFile(file).catch(() => null)
-      const unchangedSince = now === null ? written === null : written !== null && now.equals(written)
+      const unchangedSince = now === null ? written === null : written !== null && fingerprint(now) === written
       if (!unchangedSince && !force) {
         skipped.push(shown(file))
         continue
