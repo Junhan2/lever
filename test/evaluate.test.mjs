@@ -22,6 +22,20 @@ test('finds the last statement across semicolons and line breaks', () => {
   assert.equal(lastOf('   '), null)
 })
 
+test('the block of a statement ends it, so an expression on the next line is the result', async () => {
+  assert.equal(lastOf('for (const f of files) {\n  use(f)\n}\n({ done: true })'), '({ done: true })')
+  assert.equal(lastOf('if (a) {\n} else {\n}\n[1, 2].length'), '[1, 2].length')
+  assert.equal(lastOf('try { a() } catch (e) {} finally {}\n`text`'), '`text`')
+  assert.equal(lastOf('function f() {}\n(f())'), '(f())')
+  assert.equal(lastOf('const f = () => {\n}\n(1 + 1)'), '(1 + 1)') // an arrow function cannot be called this way
+  assert.equal(lastOf('let i = 0\ndo { i++ } while (i < 3)\ni'), 'i')
+  // a function expression or an object can be called or indexed on the next line: JavaScript reads one statement
+  assert.equal(lastOf('const g = function (v) { return v }\n(4)'), 'const g = function (v) { return v }\n(4)')
+  const { evaluate } = createEvaluator({})
+  assert.equal(JSON.stringify(await evaluate('const out = []\nfor (const n of [1, 2]) {\n  out.push(n * 2)\n}\n({ out })').promise), '{"out":[2,4]}')
+  assert.equal(await evaluate('const g = function (v) { return v * 2 }\n(4)\ng').promise, 8)
+})
+
 test('a template literal holding code lines is never split or changed', () => {
   const code = 'const text = `const x = 1\nconst y = 2;\nx + y`\ntext.length'
   assert.equal(lastOf(code), 'text.length')

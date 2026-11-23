@@ -22,6 +22,12 @@ test('read, ranges, write and JSON', async () => {
   assert.equal(await files.exists('out/b.json'), true)
   assert.deepEqual(await files.ls('.'), ['a.txt', 'out/'])
   assert.ok(env.current.bytesIn >= 14)
+  // a grep match or a write result stands for its file
+  assert.equal(await files.read({ file: 'a.txt', line: 2, text: 'two' }, { from: 2, to: 2 }), 'two')
+  // exists without await is a promise, which is always truthy: the run keeps the call so the reply can say so
+  assert.equal(env.current.loose.size, 0)
+  assert.equal(files.exists('nothing-here.txt') ? 'always' : 'never', 'always')
+  assert.deepEqual([...env.current.loose], ["exists('nothing-here.txt')"])
 })
 
 test('edit: one pair, pairs, all, function, and helpful misses', async () => {
@@ -31,7 +37,7 @@ test('edit: one pair, pairs, all, function, and helpful misses', async () => {
   assert.equal((await files.edit('c.ts', 'const b = 2', 'const b = 3')).replaced, 1)
   await assert.rejects(files.edit('c.ts', '= 1', '= 9'), /found 2 times \(lines 1, 6\)/)
   assert.equal((await files.edit('c.ts', '= 1', '= 9', { all: true })).replaced, 2)
-  await assert.rejects(files.edit('c.ts', 'if (x) {\n  go()', 'nope'), /matches if whitespace is ignored/)
+  await assert.rejects(files.edit('c.ts', '  if (x) {\n  go()\n  }', 'nope'), /matches if whitespace is ignored/) // lines moved unevenly
   await assert.rejects(files.edit('c.ts', 'const b = 3\nconst zzz', 'nope'), /first line is at line 2/)
   await files.edit('c.ts', [['const a = 9', 'let a = 9'], ['go()', 'stop()']])
   await files.edit('c.ts', text => text.toUpperCase())
@@ -75,4 +81,42 @@ test('a guard can keep a path away', async () => {
   await assert.rejects(files.write('secret.txt', 'z'), /kept away/)
   assert.equal(readFileSync(path.join(dir, 'secret.txt'), 'utf8'), 'x')
   assert.equal(await files.read('fine.txt'), 'y')
+})
+
+test('edit finds text given with more or less indentation, moves the new text the same way, and says so', async () => {
+  const dir = project({ 'r.mjs': 'function tier(n) {\n  if (n > 2) return 1\n  return 0\n}\nfunction other(n) {\n  return 0\n}\n', 'crlf.txt': 'alpha\r\n  beta\r\n' })
+  const env = makeEnv(dir)
+  const files = createFiles(env)
+  const read = () => readFileSync(path.join(dir, 'r.mjs'), 'utf8')
+  await files.edit('r.mjs', '    if (n > 2) return 1', '    if (n >= 2) return 1')
+  assert.ok(read().includes('\n  if (n >= 2) return 1\n'))
+  assert.ok(env.current.notes.some(note => /indented 2 spaces less than given/.test(note)))
+  await files.edit('r.mjs', 'function tier(n) {\nif (n >= 2) return 1', 'function tier(n) {\nif (n === 1) return 2\nif (n >= 2) return 1')
+  assert.ok(read().startsWith('function tier(n) {\n  if (n === 1) return 2\n  if (n >= 2) return 1\n  return 0\n'))
+  await assert.rejects(files.edit('r.mjs', '    return 0', 'x'), /text not found/) // two places fit
+  await files.edit('crlf.txt', 'alpha\n  beta', 'ALPHA\n  BETA')
+  assert.equal(readFileSync(path.join(dir, 'crlf.txt'), 'utf8'), 'ALPHA\r\n  BETA\r\n')
+})
+
+test('changes to one file that start together all land; an edit function cannot change its own file', async () => {
+  const dir = project({ 'same.txt': 'a b c d e\n' })
+  const files = createFiles(makeEnv(dir))
+  await Promise.all([files.edit('same.txt', 'a', 'A'), files.edit('same.txt', 'c', 'C'), files.write('other.txt', '1'), files.edit('same.txt', 'e', 'E')])
+  assert.equal(await files.read('same.txt'), 'A b C d E\n')
+  await assert.rejects(
+    files.edit('same.txt', text => files.write('same.txt', 'x').then(() => text)),
+    /already being changed by the edit function/,
+  )
+  assert.equal((await files.edit('same.txt', 'A', 'a')).changed, true) // the file is not left locked
+})
+
+test('file errors say what to try next', async () => {
+  const files = createFiles(makeEnv(project({ 'settings.json': '{}', 'src/a.mjs': 'x\n' })))
+  await assert.rejects(files.read('src'), /read\(src\): that is a folder\. List it with ls\('src'\)/)
+  await assert.rejects(files.read('setting.json'), /read\(setting\.json\): no such file\. Close names in .*: settings\.json/)
+  await assert.rejects(files.edit('src/A.MJS.bak', 'x', 'y'), /no such file/)
+  await assert.rejects(files.read('nowhere/x.txt'), /the folder nowhere does not exist/)
+  await assert.rejects(files.ls('settings.json'), /that is a file\. Read it with read\('settings\.json'\)/)
+  await assert.rejects(files.edit(undefined, 'a', 'b'), /edit\(path\): the path must be a non-empty string, got undefined/)
+  assert.equal((await files.read('missing.txt').catch(error => error.code)), 'ENOENT') // code is kept for code that checks it
 })

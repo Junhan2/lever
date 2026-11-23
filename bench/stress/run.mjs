@@ -5,6 +5,7 @@
 // of tool calls plus one, which hides that the built-in tools can run several calls in one round trip.
 //   node bench/stress/run.mjs [--model haiku] [--repeats 3] [--ways built-in,both,lever] [--tasks fix-tests,dependents]
 //                             [--concurrency 3] [--out runs.jsonl] [--lever /path/to/bin/lever.mjs] [--user-settings]
+//                             [--lever-env LEVER_MAX_OUTPUT=8000]   a setting for the lever server (repeatable)
 //   node bench/stress/run.mjs --report runs.jsonl       prints the tables for saved runs without running anything
 // Each run works on a fresh copy of the generated project. By default your user settings (CLAUDE.md, plugins, hooks)
 // stay out, so the numbers are close to what a fresh install sees; --user-settings keeps them in.
@@ -40,7 +41,7 @@ const option = (name, fallback) => {
   return at === -1 ? fallback : args[at + 1]
 }
 
-function runOne({ task, way, repeat, model, leverBin, userSettings }) {
+function runOne({ task, way, repeat, model, leverBin, leverEnv, userSettings }) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'lever-stress-'))
   makeProject(dir, task.fixture)
   // The prompt comes first: --allowedTools and --disallowedTools take several values and would swallow it.
@@ -50,7 +51,7 @@ function runOne({ task, way, repeat, model, leverBin, userSettings }) {
   if (WAYS[way].lever) {
     // lever runs without the owner's own hooks, guards and config, like the rest of this clean setup
     configDir = mkdtempSync(path.join(os.tmpdir(), 'lever-stress-config-'))
-    const server = { command: process.execPath, args: [leverBin], env: { CLAUDE_PROJECT_DIR: dir, LEVER_HOOKS: 'off', LEVER_CONFIG: path.join(configDir, 'none.json') } }
+    const server = { command: process.execPath, args: [leverBin], env: { CLAUDE_PROJECT_DIR: dir, LEVER_HOOKS: 'off', LEVER_CONFIG: path.join(configDir, 'none.json'), ...leverEnv } }
     writeFileSync(path.join(configDir, 'mcp.json'), JSON.stringify({ mcpServers: { lever: server } }))
     flags.push('--mcp-config', path.join(configDir, 'mcp.json'))
   }
@@ -109,6 +110,7 @@ function runOne({ task, way, repeat, model, leverBin, userSettings }) {
         way,
         model,
         repeat,
+        settings: Object.entries(leverEnv).map(pair => pair.join('=')).join(' '),
         correct: verdict === true,
         why: verdict === true ? null : String(verdict).slice(0, 300),
         rounds: rounds.size,
@@ -209,9 +211,10 @@ if (isMain) {
     const tasks = TASKS.filter(task => !wanted || wanted.includes(task.key))
     const out = option('out', path.join(os.tmpdir(), `lever-stress-${Date.now()}.jsonl`))
     const leverBin = path.resolve(option('lever', path.join(ROOT, 'bin', 'lever.mjs')))
+    const leverEnv = Object.fromEntries(args.flatMap((arg, index) => (args[index - 1] === '--lever-env' ? [[arg.slice(0, arg.indexOf('=')), arg.slice(arg.indexOf('=') + 1)]] : [])))
     const jobs = []
-    for (let repeat = 1; repeat <= repeats; repeat++) for (const task of tasks) for (const way of ways) jobs.push({ task, way, repeat, model, leverBin, userSettings: args.includes('--user-settings') })
-    console.error(`${jobs.length} runs · model ${model} · lever ${leverBin} · saving to ${out}`)
+    for (let repeat = 1; repeat <= repeats; repeat++) for (const task of tasks) for (const way of ways) jobs.push({ task, way, repeat, model, leverBin, leverEnv, userSettings: args.includes('--user-settings') })
+    console.error(`${jobs.length} runs · model ${model} · lever ${leverBin}${Object.keys(leverEnv).length ? ` (${JSON.stringify(leverEnv)})` : ''} · saving to ${out}`)
     const rows = []
     const workers = Array.from({ length: Number(option('concurrency', 3)) }, async () => {
       while (jobs.length) {

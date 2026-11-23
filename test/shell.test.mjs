@@ -50,6 +50,23 @@ test('text, lines, json and cwd', async () => {
   assert.equal(await $('echo whole command').text(), 'whole command')
 })
 
+test('the chain other shells have works here: cwd, env, quiet, throws, input', async () => {
+  const dir = project()
+  mkdirSync(path.join(dir, 'sub'))
+  const env = makeEnv(dir)
+  const $ = createShell(env)
+  assert.ok((await $`pwd`.cwd('sub').nothrow().text()).endsWith(`${path.sep}sub`))
+  assert.equal(await $`printf %s "$LEVER_X-$LEVER_Y"`.env({ LEVER_X: '1' }).env({ LEVER_Y: '2' }).quiet().text(), '1-2')
+  assert.equal((await $`exit 4`.throws(false)).exitCode, 4)
+  assert.equal(await $`sort`.input('b\na\n').text(), 'a\nb')
+  assert.equal(await $({ input: 'from options' })`cat`.text(), 'from options')
+  // a folder that is not there is named, instead of the shell looking missing
+  await assert.rejects($`pwd`.cwd('no-such-folder'), /the folder to run in does not exist: no-such-folder/)
+  // an option $ does not have is named in a note, not silently dropped
+  await $({ stdio: 'inherit', cwd: 'sub' })`true`
+  assert.ok(env.current.notes.some(note => /\$ ignored the option stdio \(it takes cwd, env, timeout, nothrow, input, quiet\)/.test(note)))
+})
+
 test('timeout and abort stop the command and what it started', async () => {
   const env = makeEnv(project())
   const $ = createShell(env)

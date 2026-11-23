@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { capReply, render, renderWithin, settle, shellText, toPlain } from '../src/format.mjs'
+import { capReply, pruneSpill, render, renderWithin, saveFile, settle, shellText, toPlain } from '../src/format.mjs'
 
 const shell = (over = {}) => ({ __lever: 'shell', command: 'npm test', exitCode: 0, signal: null, stdout: 'ok\n', stderr: '', ...over })
 
@@ -13,7 +13,8 @@ test('renders values the way a person would want to read them', () => {
   assert.equal(render(42), '42')
   assert.equal(render([1, 'a', true]), '[1,"a",true]')
   assert.equal(render({ edited: 'src/a.ts', count: 2 }), 'edited: src/a.ts\ncount: 2')
-  assert.equal(render({ out: 'line 1\nline 2' }), 'out:\n  line 1\n  line 2')
+  // text of several lines comes exactly as it is, under its own header and after the one-line values
+  assert.equal(render({ src: 'if (x) {\n  go()\n}\n', exit: 0, files: ['a.ts'] }), 'exit: 0\nfiles: ["a.ts"]\n==> src <==\nif (x) {\n  go()\n}')
   assert.equal(render([{ f: 'a', n: 1 }, { f: 'b', n: 2 }]), '(2 items)\n{"f":"a","n":1}\n{"f":"b","n":2}')
   assert.equal(render(shell()), 'ok')
   assert.equal(render(new Map([['k', 1]])), 'k: 1')
@@ -71,4 +72,23 @@ test('renderWithin cuts nothing that fits, and keeps both ends of a long string 
   assert.ok(shortened.text.length <= 8000)
   assert.match(shortened.text, /\n…\+\d+ more$/)
   assert.ok(shortened.whole.endsWith('src/file-2999.mjs'))
+  // the longest strings give way first: the short list beside them stays whole, and most of the room is used
+  const mixed = { files: Array.from({ length: 15 }, (_, i) => `src/services/s${i}.mjs`), texts: Array.from({ length: 15 }, (_, i) => ({ f: i, text: `line ${i}\n`.repeat(150) })) }
+  const fitted = renderWithin(mixed, 8000)
+  assert.ok(fitted.text.length <= 8000 && fitted.text.length > 6500)
+  assert.ok(fitted.text.includes('src/services/s14.mjs') && !fitted.text.includes('more'))
+  assert.equal((fitted.text.match(/chars cut/g) ?? []).length, 15)
+})
+
+test('saved replies older than a week are removed, and nothing else is', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'lever-prune-test-'))
+  const old = saveFile('old reply', dir, 'run-1-1')
+  const fresh = saveFile('new reply', dir, 'run-1-2')
+  const other = path.join(dir, 'notes.txt')
+  writeFileSync(other, 'not a saved reply')
+  const longAgo = new Date(Date.now() - 9 * 86_400_000)
+  utimesSync(old, longAgo, longAgo)
+  utimesSync(other, longAgo, longAgo)
+  pruneSpill(dir)
+  assert.deepEqual([existsSync(old), existsSync(fresh), existsSync(other)], [false, true, true])
 })

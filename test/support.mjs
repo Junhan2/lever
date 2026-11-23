@@ -10,6 +10,7 @@ export function fakeRun(id = '1') {
     id,
     steps: [],
     notes: [],
+    loose: new Set(),
     journal: new Map(),
     bytesIn: 0,
     signal: controller.signal,

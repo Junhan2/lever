@@ -2,7 +2,8 @@
 // handshake (server/discover, the version in each request's _meta) and the older initialize handshake.
 import readline from 'node:readline'
 import { NAME, VERSION } from './config.mjs'
-import { INSTRUCTIONS, TOOL_DESCRIPTION } from './docs.mjs'
+import { INSTRUCTIONS, toolDescription } from './docs.mjs'
+import { pruneSpill } from './format.mjs'
 import { createRunner } from './runner.mjs'
 
 const PROTOCOL_VERSIONS = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']
@@ -11,10 +12,10 @@ const META = 'io.modelcontextprotocol/'
 const CACHE = { ttlMs: 3_600_000, cacheScope: 'public' }
 const HEARTBEAT = 15_000
 
-const RUN_TOOL = {
+const runTool = config => ({
   name: 'run',
   title: 'Run JavaScript',
-  description: TOOL_DESCRIPTION,
+  description: toolDescription(config.maxOutput),
   inputSchema: {
     type: 'object',
     properties: {
@@ -29,7 +30,7 @@ const RUN_TOOL = {
   // Claude Code defers MCP tools behind tool search by default; run is the tool for most steps, so it loads up front and
   // the first use costs no extra search turn (https://code.claude.com/docs/en/mcp#mark-a-tool-to-load-upfront-or-stay-deferred).
   _meta: { 'anthropic/alwaysLoad': true },
-}
+})
 
 /** Claude Code moves long tool calls to the background by itself; other clients (Codex: 60 s) need lever to. */
 function autoBackgroundFor(clientName, configured) {
@@ -38,7 +39,9 @@ function autoBackgroundFor(clientName, configured) {
 }
 
 export function startServer(config, { input = process.stdin, output = process.stdout, onClose } = {}) {
+  pruneSpill(config.spillDir)
   const runner = createRunner(config)
+  const tools = [runTool(config)]
   const serverInfo = { name: NAME, title: 'lever', version: VERSION }
   const active = new Map()
   let clientName = ''
@@ -108,7 +111,7 @@ export function startServer(config, { input = process.stdin, output = process.st
       case 'ping':
         return reply(id, {})
       case 'tools/list':
-        return reply(id, { tools: [RUN_TOOL], ...CACHE })
+        return reply(id, { tools, ...CACHE })
       case 'tools/call':
         return callTool(id, params).catch(error => fail(id, -32603, `lever: ${error.message}`))
       case 'notifications/cancelled':

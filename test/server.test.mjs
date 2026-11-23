@@ -99,6 +99,19 @@ test('2026-07-28 clients: discover, _meta versions, cancellation, background for
   })
 })
 
+test('code that throws later, or drops a rejected promise, keeps the session; the reply says what was thrown', async () => {
+  await withClient(project(), {}, async client => {
+    await client.request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'claude-code', version: '9' } })
+    const run = async code => (await client.request('tools/call', { name: 'run', arguments: { code } })).result.content[0].text
+    await run('state.kept = 7')
+    assert.equal(await run("setTimeout(() => { throw new Error('late boom') }, 20); 'first'"), 'first')
+    await new Promise(resolve => setTimeout(resolve, 200))
+    assert.match(await run('state.kept'), /^7\n---\nnote: thrown outside the awaited code \(by a timer, an event, or a promise without await\): Error: late boom$/)
+    assert.match(await run("Promise.reject(new Error('nobody waits')); 'second'"), /^second\n---\nnote: thrown outside the awaited code .*: Error: nobody waits$/)
+    assert.equal(await run('state.kept'), '7')
+  })
+})
+
 test('a loop that never yields is ended and the next run still works', async () => {
   await withClient(project(), { LEVER_TIMEOUT_MS: '400' }, async client => {
   await client.request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'claude-code', version: '9' } })

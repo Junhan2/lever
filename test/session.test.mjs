@@ -81,6 +81,24 @@ test('undo across runs, long replies saved to a file, imports and promises in va
   assert.match(long.text, /full text: /)
   assert.equal((await session.run('4', "import { basename } from 'node:path'\nbasename('/a/b.txt')")).text, 'b.txt')
   assert.equal((await session.run('5', '({ a: Promise.resolve(1), b: sleep(5).then(() => 2) })')).text, 'a: 1\nb: 2')
+  // file text comes back exactly, so it can go into edit() as it is
+  assert.equal((await session.run('6', "({ n: 1, text: await read('keep.txt') + '  indented\\n' })")).text.split('\n---\n')[0], 'n: 1\n==> text <==\nv1\n  indented')
+})
+
+test('mistakes that code written for other tools makes get a hint or a note', async () => {
+  const session = createSession(configFor(project({ 'a.txt': 'x\n' })))
+  const text = async (id, code) => (await session.run(id, code)).text
+  assert.match(await text('1', "const ls = await ls('.')\nls"), /Cannot access 'ls' before initialization\n {2}at line 1.*\n {2}hint: "ls" is a helper, and a const or let with the same name hides it/)
+  await session.run('2', 'const found = [1, 2, 3]\nconst { a: renamed, b = 2 } = { a: 1 }\nfound.length')
+  assert.match(await text('3', 'found.length'), /found is not defined\n.*\n {2}hint: "found" was declared in an earlier run\. Each run has its own scope: keep values for later runs on state \(state\.found = …\)/)
+  assert.match(await text('4', 'renamed'), /hint: "renamed" was declared in an earlier run/)
+  assert.doesNotMatch(await text('5', 'neverDeclared'), /hint:/)
+  assert.match(await text('6', 'await $`true`.pipe(x => x)'), /is not a function\n.*\n {2}hint: \$ chains \.nothrow\(\) \.cwd\(dir\)/)
+  assert.equal(await text('7', 'const kept = 1'), '(done, nothing returned: the code ends with a declaration. End with the value, or return it, to see a result.)')
+  assert.equal(await text('8', 'state.n = 1; void 0'), '(done, nothing returned)')
+  const unread = await text('9', "exists('a.txt') ? 'yes' : 'no'")
+  assert.match(unread, /^yes\n---\nnote: exists\('a\.txt'\) was called without await, so the result was never read \(a promise is always truthy\)\. Write: await exists\(path\)$/)
+  assert.equal(await text('10', "(await exists('a.txt')) ? 'yes' : 'no'"), 'yes')
 })
 
 test('an error from two lines read as one expression says how to fix it', async () => {

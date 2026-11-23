@@ -19,10 +19,14 @@ const PUNCT = [
 ]
 const ENDS_EXPRESSION = new Set([')', ']', '}', '++', '--'])
 const NEW_STATEMENT_PUNCT = new Set(['!', '~', '++', '--', '{', ';'])
+const BLOCK_HEADS = new Set(['if', 'for', 'while', 'switch', 'try', 'do', 'function', 'class']) // statements that end with a block
+const BLOCK_OPENERS = new Set(['else', 'try', 'finally', 'do', 'catch']) // words a block can follow directly
+const BLOCK_CONTINUES = new Set(['else', 'catch', 'finally'])
 
 /** Finds the range of the last top-level statement: { start, end } in `code`, or null when there is none.
  * Strings, template literals (with nested `${}`), comments and regular expressions are skipped. A line break ends a
- * statement only where JavaScript's automatic semicolon insertion would end it. */
+ * statement only where JavaScript's automatic semicolon insertion would end it, and the block of an if, for, while,
+ * try, function or class ends its statement, so `for (…) {…}` followed by `({ … })` is two statements. */
 export function lastStatement(code) {
   const n = code.length
   let i = 0
@@ -33,6 +37,10 @@ export function lastStatement(code) {
   let current = -1 // start of the statement in progress at depth 0
   let last = null
   let lastEnd = -1 // end of the last significant token at depth 0
+  let head = '' // the first word of that statement ('' when it starts with something else)
+  let size = 0 // its tokens at depth 0 so far
+  let brace = null // what the open top-level { is: 'block' (a statement's body), 'arrow' (an arrow function's) or 'value'
+  let closed = null // the same for a top-level } when it is the last token
 
   const endsStatement = token =>
     token.kind === 'word' ? !OPEN_WORDS.has(token.value) : token.kind === 'punct' ? ENDS_EXPRESSION.has(token.value) : true
@@ -43,12 +51,44 @@ export function lastStatement(code) {
     (prev.kind === 'punct' && (!ENDS_EXPRESSION.has(prev.value) || (prev.value === '}' && depth === 0))) ||
     (prev.kind === 'word' && REGEX_AFTER_WORD.has(prev.value))
 
+  const begin = (start, kind, value) => {
+    current = start
+    head = kind === 'word' ? value : ''
+    size = 0
+  }
+  /** Whether the statement in progress ended before the token that comes now. */
+  const endedBefore = (kind, value) => {
+    if (closed === 'block') {
+      // the body of a statement ends it, whatever follows, except the words that carry it on
+      const carriesOn = kind === 'word' && (BLOCK_CONTINUES.has(value) || (value === 'while' && head === 'do'))
+      return !carriesOn && !(kind === 'punct' && value === ';')
+    }
+    if (!newline || !prev) return false
+    // an arrow function cannot be called or indexed, so ( [ or ` on the next line starts a new statement
+    if (closed === 'arrow' && (kind === 'template' || (kind === 'punct' && (value === '(' || value === '[')))) return true
+    return endsStatement(prev) && !continuesStatement(kind, value)
+  }
+  /** What a { at depth 0 opens, from the statement it is in and the token before it. */
+  const braceKind = () => {
+    if (prev?.kind === 'punct' && prev.value === '=>') return 'arrow'
+    if (!BLOCK_HEADS.has(head)) return 'value'
+    if (head === 'class' || (prev?.kind === 'punct' && prev.value === ')')) return 'block'
+    return prev?.kind === 'word' && BLOCK_OPENERS.has(prev.value) ? 'block' : 'value'
+  }
+
   const token = (start, end, kind, value) => {
     if (depth === 0) {
-      if (current === -1) current = start
-      else if (newline && prev && endsStatement(prev) && !continuesStatement(kind, value)) {
+      if (current === -1) begin(start, kind, value)
+      else if (endedBefore(kind, value)) {
         last = { start: current, end: lastEnd }
-        current = start
+        begin(start, kind, value)
+      }
+      if (++size === 2 && head === 'async' && kind === 'word' && value === 'function') head = 'function'
+      closed = null
+      if (kind === 'punct' && value === '{') brace = braceKind()
+      else if (kind === 'punct' && value === '}') {
+        closed = brace
+        brace = null
       }
       lastEnd = end
     }

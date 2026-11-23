@@ -19,7 +19,9 @@
   },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
-    "bench": "node bench/run.mjs"
+    "bench": "node bench/run.mjs",
+    "edge": "node bench/edge.mjs",
+    "stress": "node bench/stress/run.mjs"
   },
   "keywords": [
     "mcp",
