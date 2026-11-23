@@ -1,7 +1,7 @@
 // What the model reads: the tool description (sent with every request, so it stays short), the server instructions,
 // and help(topic) for the details, read only when needed.
 
-export const TOOL_DESCRIPTION = `Run JavaScript (Node, async) that does many steps in one call. Only what the code returns or logs comes back, so search, read, edit and test in one run and return just the part you need.
+export const TOOL_DESCRIPTION = `Run JavaScript (Node, async) that does many steps in one call. Use it in place of separate Bash, Read, Grep, Glob and Edit calls whenever a task takes more than one step. Only what the code returns or logs comes back, so search, read, edit and test in one run and return just the part you need.
 
 Helpers (paths are relative to the project folder):
 await $\`cmd \${x}\`  shell; values are quoted; throws on a non-zero exit; result {stdout, stderr, exitCode, ok}. Chain .nothrow() .text() .lines() .json() .timeout(ms), or $({cwd, env})\`...\`
@@ -16,7 +16,7 @@ help('shell' | 'files' | 'search' | 'mcp' | 'jobs' | 'output')  more detail
 
 The last expression (or a top-level return) is the result. Promise.all runs steps in parallel. Each step still passes the user's hooks and guards. Long output is cut and the full text saved to a file.`
 
-export const INSTRUCTIONS = `lever's run tool executes JavaScript that calls shell, file, search and MCP helpers in one step and returns only what the code returns. Prefer it when a task needs three or more tool calls, or when a step produces output you need only part of (test logs, search results, big files, page snapshots). For a single small read or edit, the normal tools are just as good.`
+export const INSTRUCTIONS = `When work on files or commands takes more than one step (search then read, read then edit, edit then test, the same change in several files), start with lever's run tool: write one piece of JavaScript that does all the steps with its helpers and returns only what you need. One run takes the place of several Bash, Read, Grep, Glob and Edit calls, so the task takes fewer turns and their output stays out of the conversation. Use the separate tools only when one small call answers the request.`
 
 const TOPICS = {
   shell: `$\`git log -n 3 \${branch}\`   interpolated values are quoted as single arguments; arrays become several arguments.
