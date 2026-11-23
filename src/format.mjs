@@ -8,7 +8,7 @@ import path from 'node:path'
 const tagOf = value => Object.prototype.toString.call(value).slice(8, -1)
 const MAX_DEPTH = 6
 const MIN_STRING = 200 // long strings are never cut shorter than this to make a reply fit
-const LIST_FIRST = 2000 // lists up to this long stay whole while strings alone can make the reply fit
+const SAVED_SUFFIX = 4 // random bytes at the end of a saved file's name
 const SPILL_MAX = 16 * 1024 * 1024 // the most text one saved reply holds
 const SPILL_DAYS = 7 // saved replies older than this are removed when the server starts
 
@@ -200,9 +200,12 @@ function largestThatFits(textAt, low, high, max) {
 export function renderWithin(value, max) {
   const whole = render(value, { maxString: Infinity, maxItems: Infinity })
   if (whole.length <= max || typeof value === 'string') return { text: whole, whole }
+  // A list with more items than this cannot fit anyway, so the first pass may shorten it. That also bounds the work
+  // of each try on a value with millions of rows.
+  const listFirst = Math.max(50, Math.floor(max / 20))
   const text =
-    largestThatFits(maxString => render(value, { maxString, maxItems: LIST_FIRST }), MIN_STRING, max, max) ??
-    largestThatFits(maxItems => render(value, { maxString: MIN_STRING, maxItems }), 3, LIST_FIRST, max) ??
+    largestThatFits(maxString => render(value, { maxString, maxItems: listFirst }), MIN_STRING, max, max) ??
+    largestThatFits(maxItems => render(value, { maxString: MIN_STRING, maxItems }), 3, listFirst, max) ??
     render(value, { maxString: MIN_STRING, maxItems: 3 })
   return { text, whole }
 }
@@ -227,7 +230,7 @@ function privateDir(dir) {
 
 /** Writes data to a new file only this user can read, in the private folder `dir`. Throws when it cannot. */
 export function saveFile(data, dir, label, ext = 'txt') {
-  const file = path.join(privateDir(dir), `${label}-${randomBytes(4).toString('hex')}.${ext}`)
+  const file = path.join(privateDir(dir), `${label}-${randomBytes(SAVED_SUFFIX).toString('hex')}.${ext}`)
   writeFileSync(file, data, { mode: 0o600, flag: 'wx' })
   return file
 }
@@ -254,9 +257,10 @@ export function capReply(text, { maxOutput, spillDir, label, whole = text }) {
 
 /** Removes the saved replies in `dir` that are older than SPILL_DAYS. Only files with the names saveFile gives. */
 export function pruneSpill(dir, now = Date.now()) {
+  const saved = new RegExp(`-[0-9a-f]{${SAVED_SUFFIX * 2}}\\.\\w+$`)
   try {
     for (const name of readdirSync(dir)) {
-      if (!/-[0-9a-f]{8}\.\w+$/.test(name)) continue
+      if (!saved.test(name)) continue
       const file = path.join(dir, name)
       const info = statSync(file)
       if (info.isFile() && now - info.mtimeMs > SPILL_DAYS * 86_400_000) unlinkSync(file)

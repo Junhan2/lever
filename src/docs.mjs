@@ -2,7 +2,7 @@
 // and help(topic) for the details, read only when needed.
 
 /** The tool description. It says how much text a reply holds, so code can be written to return what fits. */
-export const toolDescription = (maxOutput = 8000) => `Run JavaScript (Node, async) that does many steps in one call. Use it in place of separate Bash, Read, Grep, Glob and Edit calls whenever a task takes more than one step. Only what the code returns or logs comes back, so search, read, edit and test in one run and return just the part you need.
+export const toolDescription = maxOutput => `Run JavaScript (Node, async) that does many steps in one call. Use it in place of separate Bash, Read, Grep, Glob and Edit calls whenever a task takes more than one step. Only what the code returns or logs comes back, so search, read, edit and test in one run and return just the part you need.
 
 Helpers (each is async: await it. Paths are relative to the project folder, and commands run there):
 await $\`cmd \${x}\`  shell; values are quoted; throws on a non-zero exit; result {stdout, stderr, exitCode, ok}. Chain .nothrow() .cwd(dir) .env({}) .timeout(ms) .input(text), then .text() .lines() .json()
@@ -65,8 +65,9 @@ When a reply would pass the limit, the longest strings are cut in the middle fir
 Return less, not more: filter, count and summarise in the code. To read part of a big file, use grep with {context} or read(path, {from, to}).`,
 }
 
-export function help(topic) {
+/** `maxOutput` is the reply limit in use, which the text without a topic states. */
+export function help(topic, maxOutput) {
   if (topic && TOPICS[topic]) return TOPICS[topic]
   const names = Object.keys(TOPICS).join(', ')
-  return topic ? `No help topic "${topic}". Topics: ${names}` : `${toolDescription()}\n\nTopics: ${names}`
+  return topic ? `No help topic "${topic}". Topics: ${names}` : `${toolDescription(maxOutput)}\n\nTopics: ${names}`
 }

@@ -50,14 +50,13 @@ test('text, lines, json and cwd', async () => {
   assert.equal(await $('echo whole command').text(), 'whole command')
 })
 
-test('the chain other shells have works here: cwd, env, quiet, throws, input', async () => {
+test('the chain other shells have works here: cwd, env, quiet, input', async () => {
   const dir = project()
   mkdirSync(path.join(dir, 'sub'))
   const env = makeEnv(dir)
   const $ = createShell(env)
   assert.ok((await $`pwd`.cwd('sub').nothrow().text()).endsWith(`${path.sep}sub`))
   assert.equal(await $`printf %s "$LEVER_X-$LEVER_Y"`.env({ LEVER_X: '1' }).env({ LEVER_Y: '2' }).quiet().text(), '1-2')
-  assert.equal((await $`exit 4`.throws(false)).exitCode, 4)
   assert.equal(await $`sort`.input('b\na\n').text(), 'a\nb')
   assert.equal(await $({ input: 'from options' })`cat`.text(), 'from options')
   // a folder that is not there is named, instead of the shell looking missing

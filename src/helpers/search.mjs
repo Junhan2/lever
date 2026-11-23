@@ -1,10 +1,11 @@
-// glob and grep. Both use ripgrep when it is on PATH (fast), and plain Node otherwise; both ways skip the same files:
-// .git, hidden names, node_modules and what .gitignore files name. Paths come back relative to the project folder, so
-// they can go straight into read() or edit().
+// glob and grep. Both use ripgrep when it is on PATH (fast), and plain Node otherwise. Both ways skip .git, hidden
+// names, node_modules and what .gitignore files name; ripgrep also reads .ignore files and git's own exclude files.
+// Paths come back relative to the project folder, so they can go straight into read() or edit().
 import { spawn } from 'node:child_process'
 import { existsSync, promises as fs, statSync } from 'node:fs'
 import path from 'node:path'
 import { types } from 'node:util'
+import { short } from '../format.mjs'
 import { escapeRegExp, GLOB_CHARS, globRoot, globToRegExp } from '../glob.mjs'
 import { checkStep, eachLine, expandHome } from './shell.mjs'
 
@@ -98,16 +99,23 @@ async function rulesIn(dir) {
 /** Whether the rules ignore `full`: the last rule that matches decides. */
 function isIgnored(rules, full, isDir) {
   let ignored = false
+  let base = null
+  let relative = ''
   for (const rule of rules) {
     if (rule.dirOnly && !isDir) continue
-    if (rule.re.test(toSlash(path.relative(rule.base, full)))) ignored = !rule.negate
+    // the rules of one .gitignore file follow each other, so the path is made relative once for each file
+    if (rule.base !== base) {
+      base = rule.base
+      relative = toSlash(path.relative(base, full))
+    }
+    if (rule.re.test(relative)) ignored = !rule.negate
   }
   return ignored
 }
 
 /** Files under the absolute folder `root`, as absolute paths, for when there is no ripgrep. scope: { hidden, ignored,
  * modules }. Unless `ignored`, the .gitignore files from `top` down to each folder apply, as they do for ripgrep. */
-async function* walk(root, scope, top = root) {
+async function* walk(root, scope, top) {
   let rules = []
   const below = path.relative(top, root)
   if (!scope.ignored && below && !below.startsWith('..') && !path.isAbsolute(below)) {
@@ -149,11 +157,14 @@ export function createSearch(env) {
     const ignored = Boolean(options.ignored || options.all)
     return { hidden: Boolean(options.hidden || options.all), ignored, modules: ignored || roots.some(root => IN_MODULES.test(root)) }
   }
-  const common = scope => {
+  /** The ripgrep arguments that say which files to look at. */
+  const common = (scope, globs = [], type) => {
     const args = ['--no-require-git', '--no-messages']
     if (scope.hidden) args.push('--hidden', '-g', '!.git')
     if (scope.ignored) args.push('--no-ignore')
     if (!scope.modules) args.push('-g', '!node_modules')
+    for (const glob of globs) args.push('-g', glob)
+    if (type) args.push('-t', type)
     return args
   }
   /** The project-relative (or, outside the project, absolute) name of a file the walk found. */
@@ -237,21 +248,22 @@ export function createSearch(env) {
 
     const scope = scopeOf(options, targets)
     const settings = { ...options, ignoreCase, before, after, max, mode, globs, run, scope }
+    const search = how => (rg ? ripgrepSearch : nodeSearch)(pattern, targets, how)
     let result
     try {
-      result = rg ? await ripgrepSearch(pattern, targets, settings) : await nodeSearch(pattern, targets, settings)
+      result = await search(settings)
     } catch (error) {
       if (!error.badPattern || options.multiline) throw error
       // Code is written with JavaScript's expressions. Where ripgrep's engine has no word for one (lookbehind, a
       // backreference), JavaScript's own engine searches the same files. A string that is no expression in either
       // engine is searched for as plain text.
       try {
+        if (!rg) throw error // JavaScript's engine is the one that just refused the pattern
         result = await nodeSearch(pattern, targets, settings)
       } catch (second) {
         if (!second.badPattern || fromRegExp || options.fixed) throw second
-        const plain = { ...settings, fixed: true }
-        result = rg ? await ripgrepSearch(pattern, targets, plain) : await nodeSearch(pattern, targets, plain)
-        run.note([`grep: "${pattern.length > 60 ? `${pattern.slice(0, 59)}…` : pattern}" is not a regular expression, so it was searched for as plain text (as with { fixed: true })`])
+        result = await search({ ...settings, fixed: true })
+        run.note([`grep: "${short(pattern, 60)}" is not a regular expression, so it was searched for as plain text (as with { fixed: true })`])
       }
     }
 
@@ -277,13 +289,11 @@ export function createSearch(env) {
   }
 
   async function ripgrepSearch(pattern, targets, { ignoreCase, fixed, word, multiline, globs, type, mode, before, after, max, run, scope }) {
-    const args = common(scope)
+    const args = common(scope, globs, type)
     if (ignoreCase) args.push('-i')
     if (fixed) args.push('-F')
     if (word) args.push('-w')
     if (multiline) args.push('-U', '--multiline-dotall')
-    for (const g of globs) args.push('-g', g)
-    if (type) args.push('-t', type)
     args.push('-e', pattern)
     if (mode === 'content') {
       if (before) args.push('-B', String(before))
@@ -309,15 +319,14 @@ export function createSearch(env) {
     return counts
   }
 
-  /** The files a search without ripgrep's own matching looks at: ripgrep's list when it is there, else the walk. */
-  async function searchFiles(targets, { globs, type, scope }) {
-    const files = []
+  /** The files a search without ripgrep's own matching looks at, one by one: ripgrep's list when it is there, else
+   * the walk, which goes only as far as the search does. */
+  async function* searchFiles(targets, { globs, type, scope }) {
     if (rg) {
-      const args = ['--files', ...common(scope)]
-      for (const g of globs) args.push('-g', g)
-      if (type) args.push('-t', type)
-      failIfBroken(await ripgrep(rg, [...args, '--', ...targets], env.projectDir, line => void files.push(stripDot(toSlash(line)))))
-      return files
+      const files = []
+      failIfBroken(await ripgrep(rg, ['--files', ...common(scope, globs, type), '--', ...targets], env.projectDir, line => void files.push(stripDot(toSlash(line)))))
+      yield* files
+      return
     }
     const filters = globs.map(g => {
       const not = g.startsWith('!')
@@ -330,15 +339,14 @@ export function createSearch(env) {
       const full = path.resolve(env.projectDir, target)
       const info = await fs.stat(full).catch(() => null)
       if (!info) continue
-      if (info.isFile()) files.push(target)
+      if (info.isFile()) yield target
       else {
         for await (const file of walk(full, scope, env.projectDir)) {
           const shown = shownFile(file, target)
-          if (wanted(shown)) files.push(shown)
+          if (wanted(shown)) yield shown
         }
       }
     }
-    return files
   }
 
   async function ripgrepContent(args, targets, { after, max, run }) {
@@ -398,7 +406,6 @@ export function createSearch(env) {
     } catch (error) {
       throw Object.assign(new Error(`grep: ${error.message}. To search for the text as it is, pass { fixed: true }.`), { badPattern: true })
     }
-    const list = await searchFiles(targets, options)
     const matches = []
     const files = []
     const counts = {}
@@ -412,7 +419,7 @@ export function createSearch(env) {
         return null
       }
     }
-    const visit = async (file, loading = load(file)) => {
+    const visit = async (file, loading) => {
       const data = await loading
       if (data === null || data.subarray(0, 8000).includes(0)) return
       const lines = data.toString('utf8').split(/\r?\n/)
@@ -446,7 +453,7 @@ export function createSearch(env) {
     }
     // files are read up to 32 ahead but matched in order, so the results stay the same
     const ahead = []
-    for (const file of list) {
+    for await (const file of searchFiles(targets, options)) {
       ahead.push([file, load(file)])
       if (ahead.length >= 32) await visit(...ahead.shift())
       if (truncated) break

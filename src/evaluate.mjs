@@ -19,7 +19,7 @@ const PUNCT = [
 ]
 const ENDS_EXPRESSION = new Set([')', ']', '}', '++', '--'])
 const NEW_STATEMENT_PUNCT = new Set(['!', '~', '++', '--', '{', ';'])
-const BLOCK_HEADS = new Set(['if', 'for', 'while', 'switch', 'try', 'do', 'function', 'class']) // statements that end with a block
+const BLOCK_HEADS = new Set(['if', 'for', 'while', 'switch', 'try', 'do', 'function', 'async', 'class']) // statements that end with a block
 const BLOCK_OPENERS = new Set(['else', 'try', 'finally', 'do', 'catch']) // words a block can follow directly
 const BLOCK_CONTINUES = new Set(['else', 'catch', 'finally'])
 
@@ -38,7 +38,6 @@ export function lastStatement(code) {
   let last = null
   let lastEnd = -1 // end of the last significant token at depth 0
   let head = '' // the first word of that statement ('' when it starts with something else)
-  let size = 0 // its tokens at depth 0 so far
   let brace = null // what the open top-level { is: 'block' (a statement's body), 'arrow' (an arrow function's) or 'value'
   let closed = null // the same for a top-level } when it is the last token
 
@@ -54,7 +53,6 @@ export function lastStatement(code) {
   const begin = (start, kind, value) => {
     current = start
     head = kind === 'word' ? value : ''
-    size = 0
   }
   /** Whether the statement in progress ended before the token that comes now. */
   const endedBefore = (kind, value) => {
@@ -83,7 +81,6 @@ export function lastStatement(code) {
         last = { start: current, end: lastEnd }
         begin(start, kind, value)
       }
-      if (++size === 2 && head === 'async' && kind === 'word' && value === 'function') head = 'function'
       closed = null
       if (kind === 'punct' && value === '{') brace = braceKind()
       else if (kind === 'punct' && value === '}') {
@@ -276,7 +273,7 @@ export function unescapeBackticks(code) {
     const c = code[i]
     if (open.length && open.at(-1) === null) {
       // the text of a template literal
-      if (c === '\\') copyTo(Math.min(n, i + 2))
+      if (c === '\\') copyTo(i + 2)
       else if (c === '`') {
         open.pop()
         copyTo(i + 1)
@@ -295,7 +292,7 @@ export function unescapeBackticks(code) {
     } else if (c === '"' || c === "'") {
       let end = i + 1
       while (end < n && code[end] !== c && code[end] !== '\n') end += code[end] === '\\' ? 2 : 1
-      copyTo(Math.min(n, end + 1))
+      copyTo(end + 1)
     } else if (c === '`') {
       open.push(null)
       copyTo(i + 1)

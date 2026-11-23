@@ -73,7 +73,7 @@ function looseMatch(text, oldText, newText) {
   return { index: found.index, length: found[0].length, newText: moved, what }
 }
 
-/** How many single-character changes turn `a` into `b`, counted up to `limit`. */
+/** How many single-character changes turn `a` into `b`. Lengths further apart than `limit` are not compared. */
 function distance(a, b, limit) {
   if (Math.abs(a.length - b.length) > limit) return limit + 1
   let row = Array.from({ length: b.length + 1 }, (_, j) => j)
@@ -124,18 +124,19 @@ export function createFiles(env) {
    * names beside it that are close. Other errors come back as they are. */
   async function explain(error, helper, file) {
     const again = message => Object.assign(new Error(`${helper}(${shown(file)}): ${message}`, { cause: error }), { code: error.code })
+    const what = helper === 'ls' ? 'folder' : 'file'
     if (error?.code === 'EISDIR') return again(`that is a folder. List it with ls('${shown(file)}') or glob('${shown(file)}/**').`)
-    if (error?.code === 'ENOTDIR') return again('a part of that path is a file, not a folder.')
+    if (error?.code === 'ENOTDIR') return again(helper === 'ls' ? `that is a file. Read it with read('${shown(file)}').` : 'a part of that path is a file, not a folder.')
     if (error?.code !== 'ENOENT') return error
     const dir = path.dirname(file)
     let names
     try {
       names = await fs.readdir(dir)
     } catch {
-      return again(`no such ${helper === 'ls' ? 'folder' : 'file'}, and the folder ${shown(dir)} does not exist either.`)
+      return again(`no such ${what}, and the folder ${shown(dir)} does not exist either.`)
     }
     const close = closeNames(path.basename(file), names.filter(name => !env.guard.hidden?.(path.join(dir, name))))
-    return again(`no such ${helper === 'ls' ? 'folder' : 'file'}.${close.length ? ` Close names in ${shown(dir) === dir ? dir : `${shown(dir)}/`}: ${close.join(', ')}` : ''}`)
+    return again(`no such ${what}.${close.length ? ` Close names in ${shown(dir) === dir ? dir : `${shown(dir)}/`}: ${close.join(', ')}` : ''}`)
   }
 
   // Changes to one file run one at a time, in the order they were asked for, so edits started together (Promise.all)
@@ -216,63 +217,61 @@ export function createFiles(env) {
       new_string: String(newText ?? ''),
       replace_all: Boolean(options.all),
     }))
-    return inTurn(file, () => change(run, file, { edits, transform, all: Boolean(options.all) }))
-  }
+    // from here on nothing else changes this file until the edit is written
+    return inTurn(file, async () => {
+      let tool = edits.length === 1 ? 'Edit' : 'MultiEdit'
+      let hookInput = edits.length === 1 ? { file_path: file, ...edits[0] } : { file_path: file, edits }
+      // A function edit hands the whole file to the code, so it is checked as a read now and as a write of the new text
+      // before anything is written.
+      if (transform) await check(run, 'Read', { file_path: file }, shown(file))
+      else await check(run, tool, hookInput, shown(file))
+      const original = await fs.readFile(file, 'utf8').catch(async error => {
+        throw await explain(error, 'edit', file)
+      })
+      run.bytesIn += Buffer.byteLength(original)
 
-  /** The part of edit that reads, changes and writes the file; it runs while nothing else changes that file. */
-  async function change(run, file, { edits, transform, all }) {
-    let tool = edits.length === 1 ? 'Edit' : 'MultiEdit'
-    let hookInput = edits.length === 1 ? { file_path: file, ...edits[0] } : { file_path: file, edits }
-    // A function edit hands the whole file to the code, so it is checked as a read now and as a write of the new text
-    // before anything is written.
-    if (transform) await check(run, 'Read', { file_path: file }, shown(file))
-    else await check(run, tool, hookInput, shown(file))
-    const original = await fs.readFile(file, 'utf8').catch(async error => {
-      throw await explain(error, 'edit', file)
-    })
-    run.bytesIn += Buffer.byteLength(original)
-
-    let text = original
-    let replaced = 0
-    let added = 0
-    let removed = 0
-    if (transform) {
-      text = await transform(original)
-      if (typeof text !== 'string') throw new EditError(`edit(${shown(file)}, fn): the function must return the new text`)
-      tool = 'Write'
-      hookInput = { file_path: file, content: text }
-      if (text !== original) await check(run, 'Write', hookInput, shown(file))
-    } else {
-      for (const { old_string: oldText, new_string: newText } of edits) {
-        if (oldText === '') throw new EditError(`edit(${shown(file)}): the text to replace is empty`)
-        const count = countOf(text, oldText)
-        if (count === 0) {
-          const loose = looseMatch(text, oldText, newText)
-          if (!loose) throw new EditError(`edit(${shown(file)}): text not found (${missHint(text, oldText)})`)
-          text = text.slice(0, loose.index) + loose.newText + text.slice(loose.index + loose.length)
-          run.note([`edit(${shown(file)}): the text was found with ${loose.what}, and replaced there with the new text moved the same way`])
-        } else if (count > 1 && !all) {
-          const lines = []
-          for (let at = text.indexOf(oldText); at !== -1 && lines.length < 5; at = text.indexOf(oldText, at + oldText.length)) lines.push(lineAt(text, at))
-          throw new EditError(`edit(${shown(file)}): text found ${count} times (lines ${lines.join(', ')}); add context or pass { all: true }`)
-        } else text = all ? text.split(oldText).join(newText) : text.replace(oldText, () => newText)
-        const times = all && count > 0 ? count : 1
-        replaced += times
-        const oldLines = oldText.split('\n').length
-        const newLines = newText.split('\n').length
-        added += Math.max(0, newLines - oldLines) * times
-        removed += Math.max(0, oldLines - newLines) * times
+      let text = original
+      let replaced = 0
+      let added = 0
+      let removed = 0
+      if (transform) {
+        text = await transform(original)
+        if (typeof text !== 'string') throw new EditError(`edit(${shown(file)}, fn): the function must return the new text`)
+        tool = 'Write'
+        hookInput = { file_path: file, content: text }
+        if (text !== original) await check(run, 'Write', hookInput, shown(file))
+      } else {
+        for (const { old_string: oldText, new_string: newText } of edits) {
+          if (oldText === '') throw new EditError(`edit(${shown(file)}): the text to replace is empty`)
+          const count = countOf(text, oldText)
+          if (count === 0) {
+            const loose = looseMatch(text, oldText, newText)
+            if (!loose) throw new EditError(`edit(${shown(file)}): text not found (${missHint(text, oldText)})`)
+            text = text.slice(0, loose.index) + loose.newText + text.slice(loose.index + loose.length)
+            run.note([`edit(${shown(file)}): the text was found with ${loose.what}, and replaced there with the new text moved the same way`])
+          } else if (count > 1 && !options.all) {
+            const lines = []
+            for (let at = text.indexOf(oldText); at !== -1 && lines.length < 5; at = text.indexOf(oldText, at + oldText.length)) lines.push(lineAt(text, at))
+            throw new EditError(`edit(${shown(file)}): text found ${count} times (lines ${lines.join(', ')}); add context or pass { all: true }`)
+          } else text = options.all ? text.split(oldText).join(newText) : text.replace(oldText, () => newText)
+          const times = options.all && count > 0 ? count : 1
+          replaced += times
+          const oldLines = oldText.split('\n').length
+          const newLines = newText.split('\n').length
+          added += Math.max(0, newLines - oldLines) * times
+          removed += Math.max(0, oldLines - newLines) * times
+        }
       }
-    }
-    if (text === original) {
-      run.step({ kind: 'edit', label: shown(file), ok: true, detail: 'unchanged' })
-      return { path: shown(file), replaced, changed: false }
-    }
-    await remember(run, file)
-    await fs.writeFile(file, text)
-    run.step({ kind: 'edit', label: shown(file), ok: true, changed: true, detail: replaced ? `${replaced}×` : 'rewritten' })
-    run.note(await env.guard.after(tool, hookInput, { filePath: file, success: true }))
-    return { path: shown(file), replaced, added, removed, changed: true }
+      if (text === original) {
+        run.step({ kind: 'edit', label: shown(file), ok: true, detail: 'unchanged' })
+        return { path: shown(file), replaced, changed: false }
+      }
+      await remember(run, file)
+      await fs.writeFile(file, text)
+      run.step({ kind: 'edit', label: shown(file), ok: true, changed: true, detail: replaced ? `${replaced}×` : 'rewritten' })
+      run.note(await env.guard.after(tool, hookInput, { filePath: file, success: true }))
+      return { path: shown(file), replaced, added, removed, changed: true }
+    })
   }
 
   /** Resolves to true or false. It notes whether anything awaited it: `if (exists(p))` without await is always true,
@@ -302,7 +301,7 @@ export function createFiles(env) {
     const dir = absolute(input, 'ls')
     await check(run, 'Glob', { pattern: '*', path: dir }, shown(dir))
     const entries = await fs.readdir(dir, { withFileTypes: true }).catch(async error => {
-      throw error?.code === 'ENOTDIR' ? Object.assign(new Error(`ls(${shown(dir)}): that is a file. Read it with read('${shown(dir)}').`, { cause: error }), { code: error.code }) : await explain(error, 'ls', dir)
+      throw await explain(error, 'ls', dir)
     })
     run.step({ kind: 'ls', label: shown(dir), ok: true })
     return entries

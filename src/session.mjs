@@ -11,14 +11,14 @@ import { bytes, capReply, cutMiddle, errorText, isShellResult, render, renderWit
 import { createGuard } from './guard.mjs'
 import { createFiles, fingerprint } from './helpers/files.mjs'
 import { createSearch } from './helpers/search.mjs'
-import { createShell } from './helpers/shell.mjs'
+import { CHAIN, createShell } from './helpers/shell.mjs'
 
 const LOG_CAP = 1024 * 1024
 const KEEP_HISTORY = 20
 const KEEP_JOBS = 50
 const KEEP_NAMES = 2000
 // import('./file.mjs') and `import x from './file.mjs'`: project files, not packages
-const FILE_IMPORTS = /\bimport\s*\(\s*(['"`])(\.{0,2}\/[^'"`]+)\1\s*\)|^\s*import\s[^'"\n]*?(['"])(\.{0,2}\/[^'"]+)\3/gm
+const FILE_IMPORTS = /\bimport\s*\(\s*(['"`])(\.{0,2}\/[^'"`]+)\1\s*\)|^[ \t]*import\s[^'"\n]*?(['"])(\.{0,2}\/[^'"]+)\3/gm
 // names a run declares: `const a`, `function b`, and the names inside `const { c, d: e } =` or `const [f] =`
 const DECLARED = /\b(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)|\b(?:const|let|var)\s*[{[]([^;]{0,400}?)[}\]]\s*=/g
 
@@ -184,7 +184,7 @@ export function createSession(config, events = {}) {
     mcp,
     jobs,
     state: {},
-    help,
+    help: topic => help(topic, config.maxOutput),
     sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
     console,
     process: processView,
@@ -226,7 +226,7 @@ export function createSession(config, events = {}) {
       if (missing && earlier.has(missing)) return `"${missing}" was declared in an earlier run. Each run has its own scope: keep values for later runs on state (state.${missing} = …).`
     }
     if (error?.name === 'TypeError' && /^\$\(\.\.\.\)\.[\w$]+ is not a function$/.test(message)) {
-      return '$ chains .nothrow() .cwd(dir) .env({…}) .timeout(ms) .input(text) .quiet(), then .text() .lines() .json().'
+      return `$ chains ${CHAIN}.`
     }
     return null
   }
@@ -291,9 +291,9 @@ export function createSession(config, events = {}) {
 
   /** The reply of a run that has nothing to show. It says so in a way that tells an empty result (a filter that matched
    * nothing) from no result, and says why when the code ends with a declaration. */
-  function nothingReturned(code, error, value) {
+  function nothingReturned(code, value) {
     if (value === '') return '(done: the code returned an empty string)'
-    const range = error ? null : lastStatement(code)
+    const range = lastStatement(code)
     const declares = range && /^(?:const|let|var)\s/.test(code.slice(range.start, range.end))
     return declares ? '(done, nothing returned: the code ends with a declaration. End with the value, or return it, to see a result.)' : '(done, nothing returned)'
   }
@@ -302,7 +302,7 @@ export function createSession(config, events = {}) {
     const logs = run.logs.length ? run.logs.join('\n') + (run.logsDropped ? `\n…[${run.logsDropped} more log lines dropped]` : '') : ''
     // The value gets the room the logs leave, and long strings inside it are cut only as much as that needs.
     const result = error ? { text: describeError(error, code, filename) } : renderWithin(value, Math.max(1000, config.maxOutput - logs.length))
-    const body = text => [logs, text].filter(Boolean).join('\n') || nothingReturned(code, error, value)
+    const body = text => [logs, text].filter(Boolean).join('\n') || nothingReturned(code, value)
     const capped = capReply(body(result.text), { maxOutput: config.maxOutput, spillDir: config.spillDir, label: `run-${process.pid}-${run.id}`, whole: body(result.whole ?? result.text) })
     const footer = summary(run, Buffer.byteLength(capped.text))
     return { text: footer ? `${capped.text}\n---\n${footer}` : capped.text, isError: Boolean(error), file: capped.file }

@@ -8,6 +8,8 @@ import path from 'node:path'
 const OUTPUT_CAP = 16 * 1024 * 1024
 const SAFE = /^[\w@%+=:,./-]+$/
 const OPTIONS = ['cwd', 'env', 'timeout', 'nothrow', 'input', 'quiet']
+/** What a command chains, for the hint when code calls a method that other shells have and this one does not. */
+export const CHAIN = '.nothrow() .cwd(dir) .env({…}) .timeout(ms) .input(text) .quiet(), then .text() .lines() .json()'
 
 const isFolder = dir => {
   try {
@@ -133,7 +135,7 @@ export function createShell(env) {
       run.step({ kind: 'sh', label: finalCommand, ok: false, detail: 'no such folder', ms: Date.now() - started })
       return { error: new Error(`$: the folder to run in does not exist: ${options.cwd} (cwd is relative to the project folder)`) }
     }
-    const input = options.input === undefined || options.input === null ? null : options.input
+    const input = options.input ?? null
     const result = await new Promise(resolve => {
       let child
       try {
@@ -247,12 +249,6 @@ export function createShell(env) {
 
     nothrow() {
       this.options.nothrow = true
-      return this
-    }
-
-    /** throws(false) is nothrow(), the name Bun's shell uses. */
-    throws(flag = true) {
-      this.options.nothrow = !flag
       return this
     }
 
