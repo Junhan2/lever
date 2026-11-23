@@ -289,8 +289,10 @@ export function createSession(config, events = {}) {
     return lines.join('\n')
   }
 
-  /** The reply of a run that returned and logged nothing; says why when the code ends with a declaration. */
-  function nothingReturned(code, error) {
+  /** The reply of a run that has nothing to show. It says so in a way that tells an empty result (a filter that matched
+   * nothing) from no result, and says why when the code ends with a declaration. */
+  function nothingReturned(code, error, value) {
+    if (value === '') return '(done: the code returned an empty string)'
     const range = error ? null : lastStatement(code)
     const declares = range && /^(?:const|let|var)\s/.test(code.slice(range.start, range.end))
     return declares ? '(done, nothing returned: the code ends with a declaration. End with the value, or return it, to see a result.)' : '(done, nothing returned)'
@@ -300,7 +302,7 @@ export function createSession(config, events = {}) {
     const logs = run.logs.length ? run.logs.join('\n') + (run.logsDropped ? `\n…[${run.logsDropped} more log lines dropped]` : '') : ''
     // The value gets the room the logs leave, and long strings inside it are cut only as much as that needs.
     const result = error ? { text: describeError(error, code, filename) } : renderWithin(value, Math.max(1000, config.maxOutput - logs.length))
-    const body = text => [logs, text].filter(Boolean).join('\n') || nothingReturned(code, error)
+    const body = text => [logs, text].filter(Boolean).join('\n') || nothingReturned(code, error, value)
     const capped = capReply(body(result.text), { maxOutput: config.maxOutput, spillDir: config.spillDir, label: `run-${process.pid}-${run.id}`, whole: body(result.whole ?? result.text) })
     const footer = summary(run, Buffer.byteLength(capped.text))
     return { text: footer ? `${capped.text}\n---\n${footer}` : capped.text, isError: Boolean(error), file: capped.file }

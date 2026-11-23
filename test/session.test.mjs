@@ -96,6 +96,7 @@ test('mistakes that code written for other tools makes get a hint or a note', as
   assert.match(await text('6', 'await $`true`.pipe(x => x)'), /is not a function\n.*\n {2}hint: \$ chains \.nothrow\(\) \.cwd\(dir\)/)
   assert.equal(await text('7', 'const kept = 1'), '(done, nothing returned: the code ends with a declaration. End with the value, or return it, to see a result.)')
   assert.equal(await text('8', 'state.n = 1; void 0'), '(done, nothing returned)')
+  assert.equal(await text('8b', "['a', 'b'].filter(line => /^#/.test(line)).join('\\n')"), '(done: the code returned an empty string)')
   const unread = await text('9', "exists('a.txt') ? 'yes' : 'no'")
   assert.match(unread, /^yes\n---\nnote: exists\('a\.txt'\) was called without await, so the result was never read \(a promise is always truthy\)\. Write: await exists\(path\)$/)
   assert.equal(await text('10', "(await exists('a.txt')) ? 'yes' : 'no'"), 'yes')

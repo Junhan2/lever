@@ -37,51 +37,67 @@ src/session.mjs: 318
 
 ### In real Claude Code
 
-`node bench/live.mjs haiku 3` gives Claude Code the same four requests three ways: with only the built-in tools (Glob, Grep, Read, Edit, Write, Bash), with the built-in tools and lever (a normal install), and with only lever's `run`. Each request works on a fresh copy of this repository, and each answer is checked. Each row is the median of three runs. Turns, tokens, cost and time come from Claude Code's own result, and input tokens include cached ones. This run used Claude Code 2.1.330 with Claude Haiku on 2026-11-23. All 36 answers were correct.
+`npm run stress` gives Claude Code eleven tasks that each take several steps, on a generated project of 82 files: fix bugs until the tests pass, move a function and update every import, change a function's signature and every caller, find the commit that broke a test, follow a chain of fifteen files, and others. Each task runs three ways: with only the built-in tools (Glob, Grep, Read, Edit, Write, Bash), with the built-in tools and lever (a normal install), and with only lever's `run`. Each run works on a fresh copy of the project, and a checker decides whether the result is right. Each row is the median of three runs.
 
-| Sum of the four tasks | Turns | Tool calls | Input tokens | Output tokens | Cost (USD) | Time (s) |
-| :- | -: | -: | -: | -: | -: | -: |
-| Built-in tools | 15 | 11 | 592,397 | 4,523 | 0.0310 | 44.1 |
-| Built-in tools + lever | 11 (−27%) | 7 (−36%) | 462,520 (−22%) | 3,239 (−28%) | 0.0282 (−9%) | 38.2 (−13%) |
-| lever only | 12 (−20%) | 8 (−27%) | 458,358 (−23%) | 3,098 (−32%) | 0.0283 (−9%) | 36.0 (−18%) |
+A model call is one round trip to the model. Claude Code's own turn count is the number of tool calls plus one, which hides that the built-in tools can send several calls in one round trip, so it is not used here. These runs used Claude Code 2.1.330 on 2026-11-24, without the user's own settings, plugins and hooks.
 
-| Task | Way | Turns | Tool calls | Used lever | Input tokens | Output tokens | Cost (USD) | Time (s) |
-| :- | :- | -: | -: | :-: | -: | -: | -: | -: |
-| Three longest source files | Built-in tools | 2 | 1 | - | 80,705 | 378 | 0.0062 | 4.0 |
-| Three longest source files | Built-in tools + lever | 2 | 1 | 0/3 | 82,716 | 425 | 0.0063 | 4.3 |
-| Three longest source files | lever only | 2 | 1 | 3/3 | 74,072 | 333 | 0.0061 | 4.4 |
-| Where each export of format.mjs is used | Built-in tools | 4 | 3 | - | 178,318 | 1,893 | 0.0091 | 12.8 |
-| Where each export of format.mjs is used | Built-in tools + lever | 3 | 2 | 3/3 | 126,329 | 1,312 | 0.0075 | 12.8 |
-| Where each export of format.mjs is used | lever only | 4 | 3 | 3/3 | 156,481 | 1,443 | 0.0081 | 11.1 |
-| Rename a function everywhere | Built-in tools | 7 | 6 | - | 250,474 | 1,873 | 0.0092 | 15.1 |
-| Rename a function everywhere | Built-in tools + lever | 4 | 3 | 3/3 | 168,586 | 1,097 | 0.0077 | 9.0 |
-| Rename a function everywhere | lever only | 4 | 3 | 3/3 | 151,309 | 813 | 0.0074 | 8.6 |
-| Run the tests, report only failures | Built-in tools | 2 | 1 | - | 82,900 | 379 | 0.0066 | 12.1 |
-| Run the tests, report only failures | Built-in tools + lever | 2 | 1 | 0/3 | 84,889 | 405 | 0.0067 | 12.1 |
-| Run the tests, report only failures | lever only | 2 | 1 | 3/3 | 76,496 | 509 | 0.0067 | 11.9 |
+Claude Haiku, 99 runs, all results right:
+
+| Sum of the eleven tasks | Right | Model calls | Tool calls | Input tokens | Output tokens | Cost (USD) | Time (s) |
+| :- | :-: | -: | -: | -: | -: | -: | -: |
+| Built-in tools | 33/33 | 56 | 74 | 1,328,725 | 20,811 | 0.0508 | 113.0 |
+| Built-in tools + lever | 33/33 | 37 (−34%) | 28 (−62%) | 904,163 (−32%) | 12,802 (−38%) | 0.0391 (−23%) | 73.7 (−35%) |
+| lever only | 33/33 | 33 (−41%) | 22 (−70%) | 657,964 (−50%) | 11,523 (−45%) | 0.0354 (−30%) | 67.4 (−40%) |
+
+Claude Opus, 99 runs, all results right:
+
+| Sum of the eleven tasks | Right | Model calls | Tool calls | Input tokens | Output tokens | Cost (USD) | Time (s) |
+| :- | :-: | -: | -: | -: | -: | -: | -: |
+| Built-in tools | 33/33 | 41 | 30 | 896,447 | 8,624 | 1.2452 | 105.8 |
+| Built-in tools + lever | 33/33 | 35 (−15%) | 24 (−20%) | 801,265 (−11%) | 6,983 (−19%) | 1.1271 (−9%) | 86.8 (−18%) |
+| lever only | 33/33 | 35 (−15%) | 24 (−20%) | 648,274 (−28%) | 7,412 (−14%) | 1.0981 (−12%) | 87.3 (−17%) |
+
+By task with Haiku, as built-in tools → built-in tools + lever → lever only:
+
+| Task | Model calls | Input tokens | Time (s) | lever chosen |
+| :- | :-: | :-: | :-: | :-: |
+| Fix three bugs until the tests pass | 4 → 4 → 4 | 100k → 106k → 88k | 9 → 8 → 7 | 3/3 |
+| Move a function to a new module and update every import | 5 → 4 → 3 | 123k → 99k → 60k | 15 → 9 → 9 | 3/3 |
+| Find the exports nothing else uses | 4 → 2 → 2 | 106k → 45k → 36k | 14 → 5 → 5 | 3/3 |
+| Triage a 4 MB log | 4 → 3 → 2 | 87k → 69k → 36k | 7 → 5 → 4 | 3/3 |
+| Add a function with tests | 4 → 3 → 3 | 91k → 71k → 57k | 7 → 6 → 6 | 3/3 |
+| Apply a config file to fifteen modules | 4 → 4 → 4 | 95k → 103k → 86k | 7 → 6 → 6 | 3/3 |
+| Find every file that depends on a module | 3 → 2 → 2 | 70k → 45k → 36k | 12 → 7 → 6 | 3/3 |
+| Fix two bugs in a 660-line module | 4 → 5 → 5 | 116k → 129k → 107k | 8 → 9 → 8 | 2/3 |
+| Change a function signature and every caller | 4 → 4 → 3 | 96k → 95k → 59k | 11 → 7 → 6 | 3/3 |
+| Find the commit that broke a test | 4 → 4 → 3 | 90k → 96k → 57k | 8 → 10 → 9 | 0/3 |
+| Follow a chain of fifteen config files | 16 → 2 → 2 | 355k → 45k → 36k | 14 → 3 → 3 | 3/3 |
 
 What the numbers show:
 
-- With a normal install, Haiku used lever for the two tasks that take several steps (6 of 6 runs) and one built-in call for the two tasks that take one step. That is what lever's instructions ask for.
-- Most input tokens are the context that Claude Code sends again on every turn, so the saving comes from fewer turns: 7 → 4 for the rename and 4 → 3 for the export count.
-- When one shell command can do the task, lever saves nothing. lever's own description adds about 1,000 tokens to each turn.
-- "lever only" also removes the six built-in tool definitions, which is about 3,300 tokens less on each turn. To run Claude Code this way, start it with `claude --disallowedTools Bash Read Edit Write Glob Grep`.
-- The wording of the instructions matters. With an earlier, vaguer version ("prefer it when a task needs three or more tool calls"), Haiku did not pick lever once in 12 runs of the normal install.
-- Three runs for each row is a small sample, and a row can change by one turn from run to run. Run the script with your own model and project before you rely on these numbers.
+- The gain depends on the shape of the task. Where each step depends on the one before (a chain of files, an analysis over many files, a log), one run takes the place of many model calls: 16 → 2 for the chain. Where the work is "read, edit, test", the built-in tools already send several calls in one round trip. There lever takes the same number of model calls, and it saves tool calls, output tokens and some time.
+- The gain depends on the model. Opus plans the built-in calls well and writes shell loops by itself, so a normal install saves it 15% of the model calls and 18% of the time, where Haiku saves 34% and 35%.
+- One task carries much of the Haiku total. Without the chain task, a normal install saves 12% of the model calls and 12% of the input tokens with Haiku.
+- lever is not better everywhere. For the 660-line module, both models needed one more model call with lever than without. A reply holds 8,000 characters, so a whole large file does not come back at once.
+- "lever only" also removes the six built-in tool definitions, which is about 3,300 tokens less on each model call. To run Claude Code this way, start it with `claude --disallowedTools Bash Read Edit Write Glob Grep`.
+- In a normal install the model picks the tool. Haiku picked lever in 29 of 33 runs and Opus in 33 of 33. The wording of lever's instructions decides this: before they named loops and steps that follow from each other, Haiku read the fifteen chain files one by one in 5 of 9 runs.
+- Three runs for each row is a small sample, and a row often moves by one model call from run to run. Run the script with your own model and project before you rely on these numbers.
+
+[bench/results/2026-11-24.md](bench/results/2026-11-24.md) has the full tables, the results before this round of fixes, what the model's own code showed, and the test of three reply limits.
 
 ### Without a model
 
-`npm run bench` does four tasks both ways on copies of this repository, without a model. The built-in side makes one call for each step and counts the output that Claude Code's tools return (Read with line numbers, absolute paths). The lever side makes one `run` call and counts its reply. Tokens are estimated as characters ÷ 4.
+`npm run bench` does four short tasks both ways on copies of this repository, without a model. The built-in side makes one call for each step and counts the output that Claude Code's tools return (Read with line numbers, absolute paths). The lever side makes one `run` call and counts its reply. Tokens are estimated as characters ÷ 4.
 
 | Task | Tool calls | Characters the model reads | ≈ Tokens | Fewer |
 | :- | :-: | -: | -: | -: |
-| Three longest source files | 16 → 1 | 152,401 → 130 | 38,100 → 33 | 99.9% |
-| Where each export of format.mjs is used | 14 → 1 | 14,024 → 215 | 3,506 → 54 | 98.5% |
-| Rename a function everywhere | 5 → 1 | 27,034 → 158 | 6,759 → 40 | 99.4% |
-| Run the tests, report only failures | 1 → 1 | 5,500 → 415 | 1,375 → 104 | 92.5% |
-| **All four** | **36 → 4** | **198,959 → 918** | **49,740 → 230** | **99.5%** |
+| Three longest source files | 16 → 1 | 184,831 → 129 | 46,208 → 32 | 99.9% |
+| Where each export of format.mjs is used | 15 → 1 | 16,555 → 229 | 4,139 → 57 | 98.6% |
+| Rename a function everywhere | 5 → 1 | 34,525 → 158 | 8,631 → 40 | 99.5% |
+| Run the tests, report only failures | 1 → 1 | 6,798 → 416 | 1,700 → 104 | 93.9% |
+| **All four** | **37 → 4** | **242,709 → 932** | **60,677 → 233** | **99.6%** |
 
-The rename leaves the same files both ways. This is the most that lever can save, because the built-in side here takes one call for every step. A real model often finds a shorter way with the built-in tools too (for the first task, Haiku used one `find … | xargs wc -l` command), so the measurement in real Claude Code above shows smaller savings.
+The rename leaves the same files both ways. This is the most that lever can save, because the built-in side here takes one call for every step. A real model often finds a shorter way with the built-in tools too (several calls in one round trip, or one shell command that does the whole task), so the measurement in real Claude Code above shows smaller savings.
 
 ## Install
 
@@ -108,23 +124,23 @@ One tool, `run`:
 | `background` | `true` starts the code as a job and replies at once. |
 | `timeout` | Seconds before the run stops (default 600; for a background job 7200). |
 
-The tool description is about 1.4 KB. Claude Code loads it up front (`anthropic/alwaysLoad`), so the first call needs no tool search. Details that the model rarely needs are behind `help(topic)`.
+The tool description is about 1.6 KB. Claude Code loads it up front (`anthropic/alwaysLoad`), so the first call needs no tool search. Details that the model rarely needs are behind `help(topic)`.
 
 ### Helpers inside the code
 
-Paths are relative to the project folder.
+Paths are relative to the project folder, and commands run there. Every helper is async.
 
 | Helper | What it does |
 | :- | :- |
-| `` await $`cmd ${x}` `` | Runs a shell command. Interpolated values are quoted. It throws on a non-zero exit. The result is `{stdout, stderr, exitCode, ok}`. Chain `.nothrow()`, `.text()`, `.lines()`, `.json()` or `.timeout(ms)`; set options with `` $({cwd, env, timeout})`...` ``. |
+| `` await $`cmd ${x}` `` | Runs a shell command. Interpolated values are quoted. It throws on a non-zero exit. The result is `{stdout, stderr, exitCode, ok}`. Before the command starts, chain `.nothrow()`, `.cwd(dir)`, `.env({...})`, `.timeout(ms)` or `.input(text)`; then `.text()`, `.lines()` or `.json()`. The same settings work as options: `` $({cwd, env, timeout, input})`...` ``. |
 | `await read(path, {from, to})` | Reads a file, or a range of its lines. |
 | `await write(path, text or object)` | Writes a file and creates its folders. An object is written as JSON. |
-| `await edit(path, old, new, {all})` | Replaces text. Without `all`, the text must occur exactly once; otherwise it throws with the line numbers or a hint. Also `edit(path, [[old, new], ...])` and `edit(path, text => newText)`. |
-| `await exists(path)`, `await ls(dir)` | Checks a path. Lists a folder. |
-| `await glob('src/**/*.ts')` | Lists files, sorted. `.gitignore` is honoured. |
-| `await grep(/re/i or 'text', {path, glob, context, files, count, max})` | Searches with ripgrep, or with Node when ripgrep is missing. Returns `[{file, line, text}]`, printed as `file:line:text`. |
+| `await edit(path, old, new, {all})` | Replaces text. Without `all`, the text must occur exactly once; otherwise it throws with the line numbers or a hint. Text that is given with every line indented more or less than in the file is still found, and the reply says so. Edits of one file that start together run one after another, so all of them land. Also `edit(path, [[old, new], ...])` and `edit(path, text => newText)`. |
+| `await exists(path)`, `await ls(dir)` | Checks a path. Lists a folder. `exists` without `await` is a promise, which is always truthy; the reply points that out. |
+| `await glob('src/**/*.ts')` | Lists files, sorted. Hidden names, `node_modules` and what `.gitignore` files name are skipped, with ripgrep and without it. |
+| `await grep(/re/i or 'text', {path, glob, context, files, count, max})` | Searches with ripgrep, or with Node when ripgrep is missing. Returns `[{file, line, text}]`, printed as `file:line:text`; `{files: true}` returns paths and `{count: true}` returns counts. Patterns that only JavaScript understands (lookbehind, backreferences) are matched by Node over the same files. A string that is no regular expression is searched for as plain text. |
 | `undo()` | Puts back the files that the most recent changing run wrote. |
-| `state` | An object that is kept between runs. |
+| `state` | An object that is kept between runs. Variables are not kept: each run has its own scope. |
 | `jobs.list()`, `jobs.wait(id)`, `jobs.cancel(id)` | Background jobs. |
 | `mcp.<server>.<tool>(args)` | Calls another MCP server from the code: the stdio servers in Claude Code's settings, in `.mcp.json` and in lever's config. `mcp.servers()` and `mcp.tools(name)` list them. |
 | `help(topic)` | More detail on `shell`, `files`, `search`, `mcp`, `jobs` or `output`. |
@@ -133,14 +149,14 @@ Node's own modules also work (`import`, `require`), but they skip lever's checks
 
 ### The reply
 
-1. What the code logged, then the result. Strings print as they are. Objects print as `key: value` lines. Arrays of objects print one JSON object per line.
-2. After `---`, a summary: the steps by kind, the bytes read and returned, and the time; failed and refused steps; changed files, with a reminder that `undo()` puts them back; messages from hooks.
-3. When a reply would be longer than 8,000 characters, long strings are cut in the middle and long lists are shortened, only as much as needed. The whole text is saved to a private file, and the reply gives its path.
-4. An error names the line of the code that threw. For the common missing-semicolon mistake it also says how to fix it.
+1. What the code logged, then the result. Strings print as they are. An object prints its one-line values as `key: value` lines, then each value of several lines under a `==> key <==` line, exactly as it is. File text that comes back this way can go into `edit` unchanged. Arrays of objects print one JSON object per line.
+2. After `---`, a summary: the steps by kind, the bytes read and returned, and the time; failed and refused steps; changed files, with a reminder that `undo()` puts them back; messages from hooks; and notes about likely mistakes, such as a helper that was called without `await`.
+3. When a reply would be longer than 8,000 characters, the longest strings are cut in the middle first and long lists are shortened after that, only as much as needed. The whole text is saved to a private file, and the reply gives its path. A saved text holds at most 16 MB, and saved texts older than a week are removed when the server starts.
+4. An error names the line of the code that threw. Common mistakes get a hint: a missing semicolon before a line that starts with `(`, a variable with the name of a helper, a name from an earlier run, a method that `$` does not have. A missing file comes with the close names in its folder.
 
 ### Long runs
 
-A run stops after 10 minutes, and a background job after 2 hours. Codex stops waiting for an MCP tool after 60 seconds, so for clients other than Claude Code, lever replies after 50 seconds and lets the run go on as a job. The model then gets the result with `jobs.wait(id)`. If a run never gives control back, as in an endless loop, lever replaces its worker thread, ends the processes that the run started, and starts with a new `state`.
+A run stops after 10 minutes, and a background job after 2 hours. Codex stops waiting for an MCP tool after 60 seconds, so for clients other than Claude Code, lever replies after 50 seconds and lets the run go on as a job. The model then gets the result with `jobs.wait(id)`. If a run never gives control back, as in an endless loop, lever replaces its worker thread, ends the processes that the run started, and starts with a new `state`. An error that code leaves behind (a timer that throws later, a rejected promise that nobody awaits) does not end the thread: the next reply shows it as a note.
 
 ## Safety
 
@@ -189,6 +205,8 @@ Claude Code added an experimental Code Mode in v2.1.323 (November 2026). The fac
 - There are no permission prompts. An `ask` rule refuses the step.
 - `mcp.<server>` starts a separate copy of a stdio server. The copy does not share the client's connection, sign-in or state, and lever cannot reach HTTP servers.
 - In Claude Code you see one tool call for each run, not one for each step.
+- `import()` of a project file keeps the copy that it loaded first. When the file changed since then, a note says so. To run the new code, start a process (`` $`node file.mjs` ``).
+- Without ripgrep, `.gitignore` support is the usual subset (comments, `!`, anchored and folder-only patterns). `.git/info/exclude` and the global ignore file are not read.
 
 ## Settings
 
@@ -223,8 +241,11 @@ The project folder is `CLAUDE_PROJECT_DIR` when the client sets it. Otherwise it
 
 ```sh
 npm test                       # unit tests and stdio tests
+npm run edge                   # 67 edge cases against the real server, without a model
 npm run bench                  # the measurement without a model
-node bench/live.mjs haiku 3    # the measurement in real Claude Code; it uses your Claude Code account
+npm run stress -- --model haiku --repeats 3    # eleven multi-step tasks in real Claude Code; it uses your Claude Code account
+node bench/stress/selftest.mjs # checks the stress tasks' own checkers
+node bench/live.mjs haiku 3    # four short tasks in real Claude Code
 ```
 
 ## Earlier work
