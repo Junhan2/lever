@@ -39,7 +39,7 @@ src/session.mjs: 318
 
 `npm run stress` gives Claude Code eleven tasks that each take several steps, on a generated project of 82 files: fix bugs until the tests pass, move a function and update every import, change a function's signature and every caller, find the commit that broke a test, follow a chain of fifteen files, and others. Each task runs three ways: with only the built-in tools (Glob, Grep, Read, Edit, Write, Bash), with the built-in tools and lever (a normal install), and with only lever's `run`. Each run works on a fresh copy of the project, and a checker decides whether the result is right. Each row is the median of three runs.
 
-A model call is one round trip to the model. Claude Code's own turn count is the number of tool calls plus one, which hides that the built-in tools can send several calls in one round trip, so it is not used here. These runs used Claude Code 2.1.330 on 2026-11-24, without the user's own settings, plugins and hooks.
+A model call is one round trip to the model. Claude Code's own turn count is the number of tool calls plus one, which hides that the built-in tools can send several calls in one round trip, so it is not used here. These runs used Claude Code 2.1.330 on 2026-11-24, without the user's own settings and hooks.
 
 Claude Haiku, 99 runs, all results right:
 
@@ -79,11 +79,36 @@ What the numbers show:
 - The gain depends on the model. Opus plans the built-in calls well and writes shell loops by itself, so a normal install saves it 15% of the model calls and 18% of the time, where Haiku saves 34% and 35%.
 - One task carries much of the Haiku total. Without the chain task, a normal install saves 12% of the model calls and 12% of the input tokens with Haiku.
 - lever is not better everywhere. For the 660-line module, both models needed one more model call with lever than without. A reply holds 8,000 characters, so a whole large file does not come back at once.
-- "lever only" also removes the six built-in tool definitions, which is about 3,300 tokens less on each model call. To run Claude Code this way, start it with `claude --disallowedTools Bash Read Edit Write Glob Grep`.
+- "lever only" also removes the six built-in tool definitions, which is about 3,300 tokens less on each model call. To run Claude Code this way, start it with `claude --disallowedTools Bash Read Edit Write Glob Grep`. `claude --tools ""` removes every built-in tool and leaves lever alone; the next measurement shows what that changes.
 - In a normal install the model picks the tool. Haiku picked lever in 29 of 33 runs and Opus in 33 of 33. The wording of lever's instructions decides this: before they named loops and steps that follow from each other, Haiku read the fifteen chain files one by one in 5 of 9 runs.
 - Three runs for each row is a small sample, and a row often moves by one model call from run to run. Drawn again at random from the same runs, the saving of a normal install with Haiku lies between 29% and 38% of the model calls. Run the script with your own model and project before you rely on these numbers.
 
 [bench/results/2026-11-24.md](bench/results/2026-11-24.md) has the full tables, the results before this round of fixes, what the model's own code showed, and the test of three reply limits.
+
+### Against Claude Code's own Code Mode
+
+Claude Code has an experimental Code Mode of its own. It starts only in an interactive session in a terminal, so `bench/stress/terminal.mjs` runs the same eleven tasks in such sessions through tmux and reads the numbers from each session's transcript. Every way ran in that kind of session, so all rows come from the same setup. Claude Haiku, Claude Code 2.1.331 on 2026-11-24, three runs for each row, 198 sessions:
+
+| Sum of the eleven tasks | Right | Model calls | Input tokens | Output tokens | Cost (USD) | Time (s) |
+| :- | :-: | -: | -: | -: | -: | -: |
+| Built-in tools | 33/33 | 59 | 2,236,725 | 18,925 | 0.0570 | 134.3 |
+| Code Mode | 31/33 | 39 (−34%) | 995,811 (−55%) | 15,713 (−17%) | 0.0437 (−23%) | 106.5 (−21%) |
+| Built-in tools + lever | 33/33 | 38 (−36%) | 1,480,664 (−34%) | 12,825 (−32%) | 0.0447 (−22%) | 92.8 (−31%) |
+| lever only | 33/33 | 37 (−37%) | 1,321,263 (−41%) | 13,030 (−31%) | 0.0433 (−24%) | 91.4 (−32%) |
+| lever, no built-in tools | 32/33 | 39 (−34%) | 316,549 (−86%) | 12,778 (−32%) | 0.0209 (−63%) | 84.3 (−37%) |
+| Code Mode + lever | 31/33 | 35 (−41%) | 924,652 (−59%) | 16,019 (−15%) | 0.0445 (−22%) | 105.5 (−21%) |
+
+What the numbers show:
+
+- **Model calls and cost are the same.** Code Mode took 39 model calls, a normal install of lever 38, and lever only 37. Three runs for each row cannot tell these apart, and the cost is within 3%.
+- **Code Mode reads fewer input tokens than a normal install of lever, because of the tool definitions.** A model call starts at 35,472 tokens in a session with the built-in tools, at 36,553 with lever added, and at 22,369 in Code Mode, which replaces the tool definitions with one description. So a normal install of lever read 49% more input tokens than Code Mode. Most of them come from the prompt cache, which is cheap, so the cost is the same.
+- **lever with no built-in tools reads the fewest.** `claude --tools ""` leaves lever as the only tool, and a model call starts at 5,779 tokens. The eleven tasks took 68% fewer input tokens than in Code Mode and about half the cost. The session then has no subagents, skills or web tools, and Haiku wrote worse code there: 12 of 87 runs of lever failed, against 2 of 80 with the other tool definitions present.
+- **lever was faster, and its answers were right.** A normal install took 92.8 s against 106.5 s. Code Mode had 2 of 33 answers wrong, both on the 4 MB log: a shell result held 13,015 of the log's 42,000 lines with no notice, and the counts of that part went into the answer.
+- **Code Mode's own code did not fail once** in 83 pieces. lever's failed 4 times in 58 runs in a normal install.
+- **Running both gains nothing.** With Code Mode on and lever connected, the model used lever in none of 33 sessions.
+- This is Haiku only, and Code Mode is experimental: it can change in any release.
+
+So where both can run, in a terminal session, they do about the same work for each model call. Where Code Mode cannot start (`claude -p`, background sessions, other clients such as Codex), lever does. [bench/results/2026-11-24-code-mode.md](bench/results/2026-11-24-code-mode.md) has the method, the tables by task and what the code of each side showed.
 
 ### Without a model
 
@@ -184,7 +209,7 @@ export default function ({ tool, input, cwd }) {
 
 ## Compared with Claude Code's built-in Code Mode
 
-Claude Code added an experimental Code Mode in v2.1.323 (November 2026). The facts in the left column come from its [documentation](https://code.claude.com/docs/en/code-mode), read on 2026-11-21.
+Claude Code added an experimental Code Mode in v2.1.323 (November 2026). The facts in the left column come from its [documentation](https://code.claude.com/docs/en/code-mode), read on 2026-11-21. A measurement of the two in the same terminal sessions is under [Measurements](#against-claude-codes-own-code-mode).
 
 | | Built-in Code Mode | lever |
 | :- | :- | :- |
@@ -244,6 +269,7 @@ npm test                       # unit tests and stdio tests
 npm run edge                   # 67 edge cases against the real server, without a model
 npm run bench                  # the measurement without a model
 npm run stress -- --model haiku --repeats 3    # eleven multi-step tasks in real Claude Code; it uses your Claude Code account
+node bench/stress/terminal.mjs --model haiku    # the same tasks in terminal sessions, with Claude Code's Code Mode; needs tmux
 node bench/stress/selftest.mjs # checks the stress tasks' own checkers
 node bench/live.mjs haiku 3    # four short tasks in real Claude Code
 ```
