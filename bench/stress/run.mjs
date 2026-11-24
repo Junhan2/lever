@@ -28,6 +28,7 @@ export const WAYS = {
   'code-mode': { label: 'Code Mode', lever: false, codeMode: true },
   both: { label: 'built-in tools + lever', lever: true, flags: ['--allowedTools', ...BUILT_IN, LEVER] },
   lever: { label: 'lever only', lever: true, flags: ['--allowedTools', LEVER, '--disallowedTools', ...BUILT_IN] },
+  'lever-alone': { label: 'lever, no built-in tools', lever: true, flags: ['--allowedTools', LEVER, '--tools', ''] },
   'code-mode+lever': { label: 'Code Mode + lever', lever: true, codeMode: true },
 }
 // A run started from inside another Claude Code session would inherit that session's variables (its plugin folders,

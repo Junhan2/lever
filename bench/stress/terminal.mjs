@@ -1,8 +1,8 @@
 // Runs the stress tasks in interactive Claude Code sessions and records every run the way bench/stress/run.mjs does.
 // Claude Code's own Code Mode (experimental) starts only in an interactive session in a terminal, so `claude -p` cannot
 // measure it. This script starts each session in tmux and measures every way in that one kind of session: built-in
-// tools, Code Mode, built-in tools and lever, lever only, and Code Mode with lever.
-//   node bench/stress/terminal.mjs [--model haiku] [--repeats 3] [--ways built-in,code-mode,both,lever,code-mode+lever]
+// tools, Code Mode, built-in tools and lever, lever only, lever with no built-in tools, and Code Mode with lever.
+//   node bench/stress/terminal.mjs [--model haiku] [--repeats 3] [--ways built-in,code-mode,both,lever,lever-alone,code-mode+lever]
 //                                  [--tasks follow-chain,bisect] [--concurrency 3] [--out runs.jsonl]
 //                                  [--keep folder]   keeps a copy of every session's transcript in that folder
 //                                  [--lever /path/to/bin/lever.mjs] [--lever-env LEVER_MAX_OUTPUT=8000]
@@ -164,7 +164,7 @@ async function runOne({ task, way, repeat, model, leverBin, leverEnv, dir, keep 
   const folder = path.join(CONFIG, 'projects', dir.replace(/[^A-Za-z0-9]/g, '-'))
   const transcript = path.join(folder, `${id}.jsonl`)
   const flags = ['--model', model, '--session-id', id, '--setting-sources', 'project,local', '--strict-mcp-config', '--permission-mode', 'bypassPermissions', '--settings', JSON.stringify({ skipDangerousModePermissionPrompt: true })]
-  const after = way === 'lever' ? ['--disallowedTools', ...BUILT_IN] : []
+  const after = way === 'lever' ? ['--disallowedTools', ...BUILT_IN] : way === 'lever-alone' ? ['--tools', ''] : []
   if (WAYS[way].lever) {
     // lever runs without the owner's own hooks, guards and config, like the rest of this clean setup
     const server = { command: process.execPath, args: [leverBin], env: { CLAUDE_PROJECT_DIR: dir, LEVER_HOOKS: 'off', LEVER_CONFIG: path.join(work, 'none.json'), ...leverEnv } }
@@ -293,7 +293,7 @@ const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPat
 if (isMain) {
   const model = option('model', 'haiku')
   const repeats = Number(option('repeats', 3))
-  const ways = option('ways', 'built-in,code-mode,both,lever,code-mode+lever').split(',')
+  const ways = option('ways', Object.keys(WAYS).join(',')).split(',')
   const other = ways.find(way => !WAYS[way])
   if (other) {
     console.error(`${other}: no such way`)
