@@ -2,7 +2,7 @@
 
 어느 MCP 클라이언트에서나 쓰는 Code Mode 입니다. 모델이 JavaScript 한 덩어리를 쓰면 lever 가 셸·파일·검색·MCP 도우미 함수와 함께 실행하고, 코드가 돌려준 값만 모델에게 보냅니다.
 
-Claude Code 2.1.330(`claude -p`, 백그라운드 세션)과 Codex(`codex exec`)에서 시험했습니다. stdio 로 MCP 서버를 띄우는 다른 클라이언트도 같은 규약을 쓰지만 아직 시험하지 않았습니다. 다른 패키지에 기대지 않으며 Node 20.11 이상이 필요합니다.
+Claude Code 2.1.330(`claude -p`, 백그라운드 세션), Codex(`codex exec`), Grok Build 1.0.92(`grok -p`)에서 시험했습니다. stdio 로 MCP 서버를 띄우는 다른 클라이언트도 같은 규약을 쓰지만 아직 시험하지 않았습니다. 다른 패키지에 기대지 않으며 Node 20.11 이상이 필요합니다.
 
 [English README](README.md)
 
@@ -109,6 +109,24 @@ Claude Code 에는 실험 기능인 자체 Code Mode 가 있습니다. 터미널
 - Haiku 만 잰 결과입니다. Code Mode 는 실험 기능이라 판마다 바뀔 수 있습니다.
 
 정리하면, 둘 다 켤 수 있는 터미널 세션에서는 모델 호출 한 번이 하는 일이 비슷합니다. Code Mode 가 켜지지 않는 곳(`claude -p`, 백그라운드 세션, Codex 같은 다른 클라이언트)에서는 lever 가 그 일을 합니다. 방법, 과제별 표, 양쪽 코드에서 드러난 것은 [bench/results/2026-11-24-code-mode.md](bench/results/2026-11-24-code-mode.md) 에 있습니다(영문).
+
+### Grok Build 에서
+
+lever 는 MCP 서버라 다른 클라이언트에서도 쓸 수 있습니다. `bench/stress/grok.mjs` 가 같은 과제 11개를 Grok Build 1.0.92(`grok -p`, grok-4.7, reasoning effort xhigh)에서 돌립니다. Grok 기본 도구만 쓰는 방식과 lever 를 MCP 서버로 함께 둔 방식을 견주었고, 규칙이나 프롬프트로 lever 를 알려 주지 않았습니다. 2026-11-24, 줄마다 3회, 실행 66회입니다.
+
+| 과제 11개의 합 | 정답 | 모델 호출 | 입력 토큰 | 출력 토큰 | 비용(USD) | 시간(초) |
+| :- | :-: | -: | -: | -: | -: | -: |
+| Grok 기본 도구만 | 33/33 | 82 | 3,654,872 | 30,687 | 1.1013 | 516.3 |
+| Grok 기본 도구 + lever | 33/33 | 57 (−30%) | 2,497,992 (−32%) | 31,859 (+4%) | 0.8732 (−21%) | 544.5 (+5%) |
+
+- **Grok 은 lever 를 스스로 골랐습니다.** 33회 중 29회입니다. Grok 은 MCP 도구를 도구 검색으로 찾는데, 서버의 안내문만으로 충분했습니다.
+- **이득의 거의 전부가 과제 둘에서 나옵니다.** 파일 15개를 따라가는 과제가 모델 호출 16번에서 4번으로, 커밋을 찾는 bisect 과제가 16번에서 5번으로 줄었습니다. 나머지 과제 9개는 lever 없이 50번, lever 와 함께 48번입니다.
+- **bisect 의 이득에는 특별한 원인이 있습니다.** lever 없는 실행 3회 중 2회에서, Grok 이 무인 실행이라는 이유로 모델의 셸 반복문을 실행하지 않았습니다. 권한 검사가 그 명령을 읽지 못했기 때문입니다. lever 안에서는 반복문이 코드라서 Grok 의 명령 검사가 적용되지 않습니다. 무인 실행에는 도움이 되지만, lever 안의 단계는 Grok 자체의 권한 규칙을 거치지 않는다는 뜻이기도 합니다.
+- **시간은 줄지 않았습니다**(516초 대 544초). 세션마다 lever 를 찾는 데 모델 호출 한 번을 씁니다.
+- **lever 는 Grok 의 맥락을 늘리지 않습니다.** Grok 은 MCP 서버의 도구 설명을 처음부터 싣지 않습니다.
+- lever 의 코드는 62번 중 7번 실패했습니다. 그중 5번은 모델이 `$"npm test"` 처럼 템플릿 자리에 문자열을 쓴 것입니다.
+
+방법과 과제별 숫자는 [bench/results/2026-11-24-grok.md](bench/results/2026-11-24-grok.md) 에 있습니다(영문).
 
 ### 모델 없이
 
@@ -270,6 +288,7 @@ npm run edge                   # 실제 서버에 엣지케이스 67개를 돌�
 npm run bench                  # 모델 없이 재는 측정
 npm run stress -- --model haiku --repeats 3    # 실제 Claude Code 로 여러 단계 과제 11개를 잼. 본인 Claude Code 계정을 씀
 node bench/stress/terminal.mjs --model haiku    # 같은 과제를 터미널 세션에서 잼. Claude Code 의 Code Mode 포함, tmux 필요
+node bench/stress/grok.mjs --repeats 3         # 같은 과제를 Grok Build 에서 잼. 본인 Grok 계정을 씀
 node bench/stress/selftest.mjs # 과제 채점기 자체 점검
 node bench/live.mjs haiku 3    # 실제 Claude Code 로 짧은 과제 4개를 잼
 ```

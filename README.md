@@ -2,7 +2,7 @@
 
 Code Mode for any MCP client. The model writes one piece of JavaScript. lever runs it with shell, file, search and MCP helpers, and only what the code returns goes back to the model.
 
-lever is tested with Claude Code 2.1.330 (`claude -p` and a background session) and with Codex (`codex exec`). Other clients that start MCP servers over stdio use the same protocol, but they are not tested yet. lever has no dependencies and needs Node 20.11 or newer.
+lever is tested with Claude Code 2.1.330 (`claude -p` and a background session), with Codex (`codex exec`) and with Grok Build 1.0.92 (`grok -p`). Other clients that start MCP servers over stdio use the same protocol, but they are not tested yet. lever has no dependencies and needs Node 20.11 or newer.
 
 [한국어 README](README.ko.md)
 
@@ -109,6 +109,24 @@ What the numbers show:
 - This is Haiku only, and Code Mode is experimental: it can change in any release.
 
 So where both can run, in a terminal session, they do about the same work for each model call. Where Code Mode cannot start (`claude -p`, background sessions, other clients such as Codex), lever does. [bench/results/2026-11-24-code-mode.md](bench/results/2026-11-24-code-mode.md) has the method, the tables by task and what the code of each side showed.
+
+### In Grok Build
+
+lever is an MCP server, so other clients can use it. `bench/stress/grok.mjs` runs the same eleven tasks in Grok Build 1.0.92 (`grok -p`, grok-4.7, reasoning effort xhigh), with Grok's own tools only and with lever among its MCP servers. No rule and no prompt named lever. Three runs for each row, 66 runs, 2026-11-24:
+
+| Sum of the eleven tasks | Right | Model calls | Input tokens | Output tokens | Cost (USD) | Time (s) |
+| :- | :-: | -: | -: | -: | -: | -: |
+| Grok's own tools | 33/33 | 82 | 3,654,872 | 30,687 | 1.1013 | 516.3 |
+| Grok's own tools + lever | 33/33 | 57 (−30%) | 2,497,992 (−32%) | 31,859 (+4%) | 0.8732 (−21%) | 544.5 (+5%) |
+
+- **Grok picked lever by itself** in 29 of 33 runs. It finds MCP tools through its tool search, and the instructions of the server were enough.
+- **Two tasks carry almost all of the gain.** The chain of fifteen files went from 16 model calls to 4, and the bisect task from 16 to 5. The other nine tasks took 50 model calls without lever and 48 with it.
+- **The bisect gain has a special cause.** In two of three runs without lever, Grok did not run the model's shell loop in this unattended mode, because its permission check could not read the command. Inside lever the loop is code, and Grok's check of commands does not apply there. That helps unattended runs, and it means that steps inside lever do not pass through Grok's own permission rules.
+- **No gain in time** (516 s against 544 s). A session spends one model call on the search for lever.
+- **lever does not make Grok's context larger**: Grok does not load the tool definitions of MCP servers.
+- lever's code failed in 7 of 62 runs; five times the model wrote `$"npm test"`, a string where JavaScript needs a template.
+
+[bench/results/2026-11-24-grok.md](bench/results/2026-11-24-grok.md) has the method and the numbers by task.
 
 ### Without a model
 
@@ -270,6 +288,7 @@ npm run edge                   # 67 edge cases against the real server, without 
 npm run bench                  # the measurement without a model
 npm run stress -- --model haiku --repeats 3    # eleven multi-step tasks in real Claude Code; it uses your Claude Code account
 node bench/stress/terminal.mjs --model haiku    # the same tasks in terminal sessions, with Claude Code's Code Mode; needs tmux
+node bench/stress/grok.mjs --repeats 3         # the same tasks in Grok Build; it uses your Grok account
 node bench/stress/selftest.mjs # checks the stress tasks' own checkers
 node bench/live.mjs haiku 3    # four short tasks in real Claude Code
 ```
