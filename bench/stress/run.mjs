@@ -8,7 +8,9 @@
 //                             [--lever-env LEVER_MAX_OUTPUT=8000]   a setting for the lever server (repeatable)
 //   node bench/stress/run.mjs --report runs.jsonl       prints the tables for saved runs without running anything
 // Each run works on a fresh copy of the generated project. By default your user settings (CLAUDE.md, plugins, hooks)
-// stay out, so the numbers are close to what a fresh install sees; --user-settings keeps them in.
+// stay out and the run gets a clean environment, so the numbers are close to what a fresh install sees;
+// --user-settings keeps both in. Claude Code's own Code Mode starts only in an interactive session, so the two ways
+// that use it are run by bench/stress/terminal.mjs, which shares this file's records and tables.
 import { spawn } from 'node:child_process'
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
@@ -18,13 +20,20 @@ import { makeProject } from './project.mjs'
 import { TASKS } from './tasks.mjs'
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url))
-const BUILT_IN = ['Glob', 'Grep', 'Read', 'Edit', 'Write', 'Bash']
-const LEVER = 'mcp__lever__run'
-const WAYS = {
+export const BUILT_IN = ['Glob', 'Grep', 'Read', 'Edit', 'Write', 'Bash']
+export const LEVER = 'mcp__lever__run'
+// `flags` are for `claude -p`. The ways without them use Claude Code's own Code Mode and run in bench/stress/terminal.mjs.
+export const WAYS = {
   'built-in': { label: 'built-in tools', lever: false, flags: ['--allowedTools', ...BUILT_IN] },
+  'code-mode': { label: 'Code Mode', lever: false, codeMode: true },
   both: { label: 'built-in tools + lever', lever: true, flags: ['--allowedTools', ...BUILT_IN, LEVER] },
   lever: { label: 'lever only', lever: true, flags: ['--allowedTools', LEVER, '--disallowedTools', ...BUILT_IN] },
+  'code-mode+lever': { label: 'Code Mode + lever', lever: true, codeMode: true },
 }
+// A run started from inside another Claude Code session would inherit that session's variables (its plugin folders,
+// its marks of a child session), and they change what the new session loads. Runs get only these.
+const PASSED = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'NODE_EXTRA_CA_CERTS']
+export const cleanEnv = () => Object.fromEntries(PASSED.filter(name => process.env[name]).map(name => [name, process.env[name]]))
 // What "a real gain on complex work" has to mean, fixed before measuring. Changes are against built-in tools only.
 export const PASS_LINES = [
   { key: 'correct', label: 'Right answers', target: 'not fewer than with built-in tools', pass: (base, way) => way.correct >= base.correct },
@@ -35,8 +44,8 @@ export const PASS_LINES = [
   { key: 'seconds', label: 'Time', target: 'not slower', pass: (base, way) => way.seconds <= base.seconds },
 ]
 
-const args = process.argv.slice(2)
-const option = (name, fallback) => {
+export const args = process.argv.slice(2)
+export const option = (name, fallback) => {
   const at = args.indexOf(`--${name}`)
   return at === -1 ? fallback : args[at + 1]
 }
@@ -59,7 +68,7 @@ function runOne({ task, way, repeat, model, leverBin, leverEnv, userSettings }) 
   flags.push(...WAYS[way].flags)
   const started = Date.now()
   return new Promise(resolve => {
-    const child = spawn('claude', flags, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn('claude', flags, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: userSettings ? process.env : cleanEnv() })
     let out = ''
     let err = ''
     child.stdout.on('data', chunk => (out += chunk))
@@ -181,14 +190,15 @@ export function report(rows) {
         }
         lines.push(`| ${line.label} | ${line.target} | ${others.map(show).join(' | ')} |`)
       }
-      if (totals.both) lines.push(`| lever chosen in a normal install | in at least 80% of runs | ${totals.both.usedLever / totals.both.runs >= 0.8 ? 'pass' : 'FAIL'} (${totals.both.usedLever}/${totals.both.runs}) | - |`)
+      const chosen = totals.both && `${totals.both.usedLever / totals.both.runs >= 0.8 ? 'pass' : 'FAIL'} (${totals.both.usedLever}/${totals.both.runs})`
+      if (chosen) lines.push(`| lever chosen in a normal install | in at least 80% of runs | ${others.map(way => (way === 'both' ? chosen : '-')).join(' | ')} |`)
     }
     const wrong = mine.filter(row => !row.correct)
     if (wrong.length) lines.push('', 'Wrong or unfinished runs:', ...wrong.map(row => `- ${row.task} · ${WAYS[row.way].label} · run ${row.repeat}: ${row.why} (${row.rounds} model calls, stop: ${row.stop})`))
     const failures = new Map()
     for (const row of mine) {
       for (const error of row.errors) {
-        const key = `${error.tool === LEVER ? 'lever' : error.tool}: ${error.text.split('\n')[0].replace(/\/[^\s'"]+\/(lever-stress-\w+)/g, '<project>').replace(/\d+/g, 'N').slice(0, 110)}`
+        const key = `${error.tool === LEVER ? 'lever' : error.tool}: ${error.text.split('\n')[0].replace(/\/[^\s'"]+\/(lever-stress-\w+|lever-terminal\/slot-\d+)/g, '<project>').replace(/\d+/g, 'N').slice(0, 110)}`
         failures.set(key, (failures.get(key) ?? 0) + 1)
       }
     }
@@ -208,6 +218,11 @@ if (isMain) {
     const model = option('model', 'haiku')
     const repeats = Number(option('repeats', 3))
     const ways = option('ways', 'built-in,both,lever').split(',')
+    const other = ways.find(way => !WAYS[way]?.flags)
+    if (other) {
+      console.error(WAYS[other] ? `${other}: Code Mode starts only in a terminal session. Run it with bench/stress/terminal.mjs` : `${other}: no such way`)
+      process.exit(1)
+    }
     const wanted = option('tasks')?.split(',')
     const tasks = TASKS.filter(task => !wanted || wanted.includes(task.key))
     const out = option('out', path.join(os.tmpdir(), `lever-stress-${Date.now()}.jsonl`))
